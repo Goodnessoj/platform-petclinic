@@ -1,6 +1,7 @@
 nameOverride: genai-service
 
 image:
+  repository: petclinic-dev-genai-service
   tag: "e5ae608"
   pullPolicy: IfNotPresent
 

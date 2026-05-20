@@ -1,6 +1,7 @@
 nameOverride: discovery-server
 
 image:
+  repository: petclinic-dev-discovery-server
   tag: "e5ae608"
   pullPolicy: IfNotPresent
 
