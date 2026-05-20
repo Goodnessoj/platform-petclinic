@@ -43,7 +43,7 @@ before exposing production traffic.
 
 ## Image Tag Updates
 
-The `update-image-tags.yml` workflow updates service values files when the
+The `update-image-tags.yaml` workflow updates service values files when the
 application build pipeline sends a dispatch event. It rewrites:
 
 - `image.tag`

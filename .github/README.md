@@ -8,8 +8,8 @@ GitOps deployment loop.
 | Workflow | File | Purpose |
 | --- | --- | --- |
 | Platform | [`workflows/platform.yaml`](workflows/platform.yaml) | Plans, applies, or destroys the selected Terraform platform. On apply it can also bootstrap runtime secrets and Argo CD applications. On destroy it pre-cleans GitOps ingresses/finalizers before Terraform removes AWS resources. |
-| Deploy ArgoCD | [`workflows/deploy-argocd.yml`](workflows/deploy-argocd.yml) | Installs or upgrades Argo CD with Helm, configures RBAC, applies Argo CD applications, and waits for selected apps. |
-| Update Image Tags | [`workflows/update-image-tags.yml`](workflows/update-image-tags.yml) | Receives app image build dispatches, updates service image tags in `helm-values`, commits the change, and triggers Argo CD deployment. |
+| Deploy ArgoCD | [`workflows/argo-argocd.yml`](workflows/argo-argocd.yml) | Installs or upgrades Argo CD with Helm, configures RBAC, applies Argo CD applications, and waits for selected apps. |
+| Update Image Tags | [`workflows/update-image-tags.yaml`](workflows/update-image-tags.yaml) | Receives app image build dispatches, updates service image tags in `helm-values`, commits the change, and triggers Argo CD deployment. |
 | Deploy Changed Petclinic Services | [`workflows/deploy-services.yaml`](workflows/deploy-services.yaml) | Imperatively deploys selected services with Helm in dependency order. This is useful when bypassing or recovering GitOps. |
 
 ## Required Configuration
@@ -38,9 +38,9 @@ The normal automated flow starts in the application repository:
 
 1. Application CI builds and pushes service images to ECR.
 2. It sends a `repository_dispatch` event of type `app-image-built`.
-3. `update-image-tags.yml` updates `helm-values/<service>.yaml` image tags.
+3. `update-image-tags.yaml` updates `helm-values/<service>.yaml` image tags.
 4. The commit to `main` is observed by Argo CD or followed by a dispatch to
-   `deploy-argocd.yml`.
+   `argo-argocd.yml`.
 5. Argo CD refreshes the affected Applications and syncs dev automatically.
 
 The platform workflow is separate. Use it for infrastructure changes, initial

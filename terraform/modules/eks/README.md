@@ -12,6 +12,8 @@ provider, and IAM roles needed by cluster add-ons.
 - IRSA role for External Secrets Operator.
 - IRSA role and policy for AWS Load Balancer Controller.
 - IRSA role for the AWS EBS CSI driver.
+- EKS access entries and cluster-admin access policy associations for
+  additional admin roles.
 - EKS add-ons:
   - `vpc-cni`
   - `kube-proxy`
@@ -54,12 +56,13 @@ Key inputs:
 
 ## Access Model
 
-This module creates IAM resources, but the environment root owns the
-`aws-auth` ConfigMap. The root maps:
-
-- the node role into Kubernetes node groups,
-- the GitHub Actions role into `system:masters`,
-- any additional admin role ARNs into `system:masters`.
+This module creates IAM resources, IRSA roles, and EKS access entries for
+`admin_role_arns`. The cluster uses `API_AND_CONFIG_MAP` authentication so EKS
+access entries can grant cluster-admin access to stable local or break-glass
+admin roles. The GitHub Actions platform workflow still bootstraps its own
+Terraform role before planning so existing clusters do not need access-entry
+imports. The legacy `aws-auth` ConfigMap is left in the cluster for
+compatibility, but Terraform no longer manages it.
 
 ## Add-On Relationship
 

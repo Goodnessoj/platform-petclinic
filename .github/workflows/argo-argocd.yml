@@ -6,7 +6,7 @@ on:
       - main
     paths:
       - "k8s/argocd/**"
-      - ".github/workflows/deploy-argocd.yml"
+      - ".github/workflows/argo-argocd.yml"
   repository_dispatch:
     types:
       - deploy-argocd

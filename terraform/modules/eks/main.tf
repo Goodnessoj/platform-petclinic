@@ -7,6 +7,8 @@ locals {
 
   oidc_provider_url = replace(aws_eks_cluster.main.identity[0].oidc[0].issuer, "https://", "")
 
+  cluster_admin_principal_arns = toset(distinct(compact(var.admin_role_arns)))
+
   external_secrets_namespace       = "external-secrets"
   external_secrets_service_account = "external-secrets"
   load_balancer_namespace          = "kube-system"
@@ -55,10 +57,40 @@ resource "aws_eks_cluster" "main" {
     endpoint_private_access = var.endpoint_private_access
   }
 
+  access_config {
+    authentication_mode                         = "API_AND_CONFIG_MAP"
+    bootstrap_cluster_creator_admin_permissions = true
+  }
+
   tags = var.tags
 
   depends_on = [
     aws_iam_role_policy_attachment.eks_cluster_policy
+  ]
+}
+
+resource "aws_eks_access_entry" "cluster_admin" {
+  for_each = local.cluster_admin_principal_arns
+
+  cluster_name  = aws_eks_cluster.main.name
+  principal_arn = each.value
+  type          = "STANDARD"
+  tags          = var.tags
+}
+
+resource "aws_eks_access_policy_association" "cluster_admin" {
+  for_each = local.cluster_admin_principal_arns
+
+  cluster_name  = aws_eks_cluster.main.name
+  principal_arn = each.value
+  policy_arn    = "arn:${data.aws_partition.current.partition}:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+
+  access_scope {
+    type = "cluster"
+  }
+
+  depends_on = [
+    aws_eks_access_entry.cluster_admin
   ]
 }
 
@@ -271,24 +303,27 @@ resource "aws_iam_role_policy_attachment" "ebs_csi" {
 }
 
 resource "aws_eks_addon" "vpc_cni" {
-  cluster_name      = aws_eks_cluster.main.name
-  addon_name        = "vpc-cni"
-  resolve_conflicts = "OVERWRITE"
-  tags              = var.tags
+  cluster_name                = aws_eks_cluster.main.name
+  addon_name                  = "vpc-cni"
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+  tags                        = var.tags
 }
 
 resource "aws_eks_addon" "kube_proxy" {
-  cluster_name      = aws_eks_cluster.main.name
-  addon_name        = "kube-proxy"
-  resolve_conflicts = "OVERWRITE"
-  tags              = var.tags
+  cluster_name                = aws_eks_cluster.main.name
+  addon_name                  = "kube-proxy"
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+  tags                        = var.tags
 }
 
 resource "aws_eks_addon" "coredns" {
-  cluster_name      = aws_eks_cluster.main.name
-  addon_name        = "coredns"
-  resolve_conflicts = "OVERWRITE"
-  tags              = var.tags
+  cluster_name                = aws_eks_cluster.main.name
+  addon_name                  = "coredns"
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+  tags                        = var.tags
 
   depends_on = [
     aws_eks_node_group.main
@@ -296,11 +331,12 @@ resource "aws_eks_addon" "coredns" {
 }
 
 resource "aws_eks_addon" "ebs_csi_driver" {
-  cluster_name             = aws_eks_cluster.main.name
-  addon_name               = "aws-ebs-csi-driver"
-  service_account_role_arn = aws_iam_role.ebs_csi.arn
-  resolve_conflicts        = "OVERWRITE"
-  tags                     = var.tags
+  cluster_name                = aws_eks_cluster.main.name
+  addon_name                  = "aws-ebs-csi-driver"
+  service_account_role_arn    = aws_iam_role.ebs_csi.arn
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+  tags                        = var.tags
 
   depends_on = [
     aws_iam_role_policy_attachment.ebs_csi

@@ -15,9 +15,9 @@ the platform.
   Terraform-managed platform ingress/DNS resources first, optionally force-delete
   leftover cluster ALBs and VPC dependencies, then wait for all ACM certificates
   to detach before running a fresh Terraform destroy.
-- `deploy-argocd.yml`: installs Argo CD, applies Argo CD RBAC, applies the
+- `argo-argocd.yml`: installs Argo CD, applies Argo CD RBAC, applies the
   Petclinic AppProject and Applications, then optionally waits for health.
-- `update-image-tags.yml`: listens for `repository_dispatch` events from the
+- `update-image-tags.yaml`: listens for `repository_dispatch` events from the
   application build pipeline and writes new image tags into `helm-values`.
 - `deploy-services.yaml`: deploys one or more services directly with Helm. It
   also ensures shared runtime secrets exist before deploying workloads.

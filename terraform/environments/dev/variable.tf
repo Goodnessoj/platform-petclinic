@@ -194,7 +194,7 @@ variable "grafana_service_type" {
 variable "argocd_repo_url" {
   description = "Repository URL used by Argo CD. Keep this as this infra repo unless you move the chart."
   type        = string
-  default     = "https://github.com/Goodnessoj/petclinic-Infra.git"
+  default     = "https://github.com/Goodnessoj/platform-petclinic.git"
 }
 
 variable "argocd_repo_username" {
