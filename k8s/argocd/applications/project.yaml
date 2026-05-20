@@ -6,7 +6,7 @@ metadata:
 spec:
   description: Spring Petclinic services managed by ArgoCD
   sourceRepos:
-    - https://github.com/Goodnessoj/petclinic-Infra.git
+    - https://github.com/Goodnessoj/platform-petclinic.git
   destinations:
     - server: https://kubernetes.default.svc
       namespace: petclinic-dev

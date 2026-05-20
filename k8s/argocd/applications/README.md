@@ -14,7 +14,7 @@ Applications.
 
 The `petclinic` project allows:
 
-- Source repository: `https://github.com/Goodnessoj/petclinic-Infra.git`
+- Source repository: `https://github.com/Goodnessoj/platform-petclinic.git`
 - Destinations:
   - `petclinic-dev`
   - `petclinic-prod`
