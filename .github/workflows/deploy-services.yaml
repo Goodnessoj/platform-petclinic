@@ -1,0 +1,480 @@
+
+name: Deploy Changed Petclinic Services
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy."
+        required: true
+        default: dev
+        type: choice
+        options:
+          - dev
+          - prod
+      services:
+        description: "Space-separated services to deploy, or all."
+        required: true
+        default: all
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: helm-deploy-${{ github.event.client_payload.environment || inputs.environment || 'dev' }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
+  AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN || secrets.AWS_ROLE_TO_ASSUME || vars.AWS_ROLE_ARN || '' }}
+  DEPLOY_ENVIRONMENT: ${{ github.event.client_payload.environment || inputs.environment || 'dev' }}
+  CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME || format('petclinic-{0}-eks', github.event.client_payload.environment || inputs.environment || 'dev') }}
+  APP_NAMESPACE: ${{ vars.K8S_NAMESPACE || format('petclinic-{0}', github.event.client_payload.environment || inputs.environment || 'dev') }}
+
+  SERVICE_CHART: helm/petclinic-service
+  SECRETS_CHART: helm/petclinic-secrets
+  SECRETS_RELEASE_NAME: petclinic-secrets
+
+  DOMAIN_NAME: ${{ vars.DOMAIN_NAME || vars.APP_DOMAIN_NAME || '' }}
+  ACM_CERTIFICATE_ARN: ${{ vars.ACM_CERTIFICATE_ARN || '' }}
+
+  DEPENDENCY_ORDER: >-
+    config-server
+    discovery-server
+    customers-service
+    vets-service
+    visits-service
+    genai-service
+    api-gateway
+    admin-server
+jobs:
+  deploy:
+    name: Deploy changed services in dependency order
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.client_payload.environment || inputs.environment || 'dev' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: gha-helm-deploy-${{ github.run_id }}
+          unset-current-credentials: true
+
+      - name: Confirm AWS identity
+        run: |
+          aws sts get-caller-identity
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name "$CLUSTER_NAME" \
+            --region "$AWS_REGION"
+          kubectl config current-context
+      - name: Verify Kubernetes authentication
+        run: |
+          kubectl auth can-i get namespaces
+          kubectl get nodes
+      - name: Resolve changed services in dependency order
+        id: context
+        env:
+          DISPATCH_SERVICES: ${{ github.event.client_payload.services || '' }}
+          DISPATCH_CHANGED_SERVICES: ${{ github.event.client_payload.changed_services || '' }}
+          DISPATCH_SERVICE: ${{ github.event.client_payload.service || '' }}
+          INPUT_SERVICES: ${{ inputs.services || '' }}
+          DISPATCH_ENVIRONMENT: ${{ github.event.client_payload.environment || '' }}
+          INPUT_ENVIRONMENT: ${{ inputs.environment || '' }}
+        run: |
+          set -euo pipefail
+          DEPLOY_ENV="${DISPATCH_ENVIRONMENT:-${INPUT_ENVIRONMENT:-dev}}"
+          normalize_services() {
+            local raw="$1"
+            if [ -z "$raw" ]; then
+              return 0
+            fi
+            if [ "$raw" = "all" ]; then
+              echo "all"
+              return 0
+            fi
+            if printf '%s' "$raw" | jq -e 'type == "array"' >/dev/null 2>&1; then
+              printf '%s' "$raw" | jq -r '.[]'
+              return 0
+            fi
+            printf '%s' "$raw" | tr ',\n\r\t' '    ' | xargs -n1
+          }
+          RAW_REQUESTED_SERVICES="${INPUT_SERVICES:-}"
+          if [ -z "$RAW_REQUESTED_SERVICES" ] || [ "$RAW_REQUESTED_SERVICES" = "all" ]; then
+            RAW_REQUESTED_SERVICES="${DISPATCH_CHANGED_SERVICES:-${DISPATCH_SERVICES:-${DISPATCH_SERVICE:-}}}"
+          fi
+          REQUESTED_SERVICES="$(normalize_services "$RAW_REQUESTED_SERVICES" | xargs || true)"
+          if [ -z "$REQUESTED_SERVICES" ] || [ "$REQUESTED_SERVICES" = "all" ]; then
+            REQUESTED_SERVICES="$DEPENDENCY_ORDER"
+          fi
+          echo "Requested services: $REQUESTED_SERVICES"
+          echo "Dependency order: $DEPENDENCY_ORDER"
+          SORTED_SERVICES=""
+          for ORDERED_SERVICE in $DEPENDENCY_ORDER; do
+            for REQUESTED_SERVICE in $REQUESTED_SERVICES; do
+              if [ "$ORDERED_SERVICE" = "$REQUESTED_SERVICE" ]; then
+                case " $SORTED_SERVICES " in
+                  *" $ORDERED_SERVICE "*)
+                    ;;
+                  *)
+                    SORTED_SERVICES="$SORTED_SERVICES $ORDERED_SERVICE"
+                    ;;
+                esac
+              fi
+            done
+          done
+          SORTED_SERVICES="$(echo "$SORTED_SERVICES" | xargs)"
+          if [ -z "$SORTED_SERVICES" ]; then
+            echo "No valid services resolved from: $REQUESTED_SERVICES" >&2
+            exit 1
+          fi
+          for SERVICE in $SORTED_SERVICES; do
+            case "$SERVICE" in
+              config-server|discovery-server|customers-service|vets-service|visits-service|genai-service|api-gateway|admin-server)
+                ;;
+              *)
+                echo "Unsupported service: $SERVICE" >&2
+                exit 1
+                ;;
+            esac
+            if [ ! -f "helm-values/${SERVICE}.yaml" ]; then
+              echo "Missing values file: helm-values/${SERVICE}.yaml" >&2
+              exit 1
+            fi
+          done
+          ENV_VALUES_FILE="helm-values/${DEPLOY_ENV}.yaml"
+          SECRETS_VALUES_FILE="helm-values/secrets-${DEPLOY_ENV}.yaml"
+          if [ ! -f "$ENV_VALUES_FILE" ]; then
+            echo "Missing environment values file: $ENV_VALUES_FILE" >&2
+            exit 1
+          fi
+          if [ ! -f "$SECRETS_VALUES_FILE" ]; then
+            echo "Missing secrets values file: $SECRETS_VALUES_FILE" >&2
+            exit 1
+          fi
+          CLUSTER_SECRET_STORE="$(awk '/^[[:space:]]*secretStoreName:/ { print $2; exit }' "$SECRETS_VALUES_FILE")"
+          if [ -z "$CLUSTER_SECRET_STORE" ]; then
+            echo "Unable to resolve secretStoreName from $SECRETS_VALUES_FILE." >&2
+            exit 1
+          fi
+          echo "deploy_env=$DEPLOY_ENV" >> "$GITHUB_OUTPUT"
+          echo "services=$SORTED_SERVICES" >> "$GITHUB_OUTPUT"
+          echo "env_values_file=$ENV_VALUES_FILE" >> "$GITHUB_OUTPUT"
+          echo "secrets_values_file=$SECRETS_VALUES_FILE" >> "$GITHUB_OUTPUT"
+          echo "cluster_secret_store=$CLUSTER_SECRET_STORE" >> "$GITHUB_OUTPUT"
+          echo "Final deployment order: $SORTED_SERVICES"
+      - name: Validate cluster prerequisites
+        env:
+          CLUSTER_SECRET_STORE: ${{ steps.context.outputs.cluster_secret_store }}
+        run: |
+          set -euo pipefail
+          kubectl create namespace "$APP_NAMESPACE" \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+          if ! kubectl get crd externalsecrets.external-secrets.io >/dev/null 2>&1; then
+            echo "ExternalSecret CRD is missing. Apply the Terraform addons layer first." >&2
+            exit 1
+          fi
+          if ! kubectl get crd clustersecretstores.external-secrets.io >/dev/null 2>&1; then
+            echo "ClusterSecretStore CRD is missing. Apply the Terraform addons layer first." >&2
+            exit 1
+          fi
+          if ! kubectl get clustersecretstore "$CLUSTER_SECRET_STORE" >/dev/null 2>&1; then
+            echo "ClusterSecretStore '$CLUSTER_SECRET_STORE' is missing. Apply the Terraform addons layer first." >&2
+            exit 1
+          fi
+      - name: Recover shared secrets release
+        run: |
+          set -euo pipefail
+          STATUS="not-found"
+          if helm status "$SECRETS_RELEASE_NAME" --namespace "$APP_NAMESPACE" >/dev/null 2>&1; then
+            STATUS="$(helm status "$SECRETS_RELEASE_NAME" \
+              --namespace "$APP_NAMESPACE" \
+              --output json | jq -r '.info.status')"
+          fi
+          echo "Secrets release status: $STATUS"
+          if [ "$STATUS" = "failed" ] || \
+             [ "$STATUS" = "pending-install" ] || \
+             [ "$STATUS" = "pending-upgrade" ] || \
+             [ "$STATUS" = "pending-rollback" ] || \
+             [ "$STATUS" = "uninstalling" ] || \
+             [ "$STATUS" = "uninstalled" ]; then
+            echo "Cleaning broken shared secrets release..."
+            helm uninstall "$SECRETS_RELEASE_NAME" \
+              --namespace "$APP_NAMESPACE" \
+              --no-hooks || true
+            kubectl delete secret \
+              --namespace "$APP_NAMESPACE" \
+              -l "owner=helm,name=${SECRETS_RELEASE_NAME}" || true
+          fi
+      - name: Install shared secrets chart
+        run: |
+          set -euo pipefail
+          helm upgrade --install "$SECRETS_RELEASE_NAME" "$SECRETS_CHART" \
+            --namespace "$APP_NAMESPACE" \
+            --create-namespace \
+            --wait \
+            --timeout 5m \
+            --cleanup-on-fail \
+            -f "${{ steps.context.outputs.secrets_values_file }}" \
+            --set openai.enabled=false
+      - name: Create or update OpenAI secret
+        shell: bash
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "GitHub secret OPENAI_API_KEY is missing or empty." >&2
+            exit 1
+          fi
+
+          kubectl delete externalsecret petclinic-openai-secret \
+            --namespace "$APP_NAMESPACE" \
+            --ignore-not-found
+
+          kubectl delete secret openai-secret \
+            --namespace "$APP_NAMESPACE" \
+            --ignore-not-found
+
+          kubectl create secret generic openai-secret \
+            --namespace "$APP_NAMESPACE" \
+            --from-literal=SPRING_AI_OPENAI_API_KEY="$OPENAI_API_KEY" \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+
+          KEY_LENGTH="$(kubectl get secret openai-secret \
+            --namespace "$APP_NAMESPACE" \
+            -o json | jq -r '.data.SPRING_AI_OPENAI_API_KEY // "" | @base64d | length')"
+
+          if [ "$KEY_LENGTH" -le 0 ]; then
+            echo "openai-secret was created, but SPRING_AI_OPENAI_API_KEY is empty." >&2
+            exit 1
+          fi
+
+          echo "openai-secret exists and contains a non-empty SPRING_AI_OPENAI_API_KEY."
+      - name: Wait for database secret
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 40); do
+            if kubectl get secret mysql-secret --namespace "$APP_NAMESPACE" >/dev/null 2>&1; then
+              echo "mysql-secret exists."
+              exit 0
+            fi
+            sleep 5
+          done
+          kubectl get externalsecret petclinic-db-secret \
+            --namespace "$APP_NAMESPACE" \
+            -o yaml || true
+          echo "mysql-secret was not created by External Secrets within the timeout window." >&2
+          exit 1
+      - name: Deploy changed services with Helm
+        env:
+          SERVICES: ${{ steps.context.outputs.services }}
+          ENV_VALUES_FILE: ${{ steps.context.outputs.env_values_file }}
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          IMAGE_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          read_image_value() {
+            local key="$1"
+            local values_file="$2"
+            awk -v key="$key" '
+              /^image:/ { in_image=1; next }
+              in_image && /^[^[:space:]]/ { exit }
+              in_image && $0 ~ "^[[:space:]]*" key ":" {
+                sub("^[[:space:]]*" key ":[[:space:]]*", "", $0)
+                gsub(/"/, "", $0)
+                print $0
+                exit
+              }
+            ' "$values_file"
+          }
+          read_image_value_from_files() {
+            local key="$1"
+            shift
+            local value=""
+            for values_file in "$@"; do
+              value="$(read_image_value "$key" "$values_file")"
+              if [ -n "$value" ]; then
+                printf '%s\n' "$value"
+                return 0
+              fi
+            done
+          }
+          echo "Deploying changed services in dependency order: $SERVICES"
+          for SERVICE in $SERVICES; do
+            SERVICE_VALUES_FILE="helm-values/${SERVICE}.yaml"
+            IMAGE_REPOSITORY="$(read_image_value_from_files repository "$SERVICE_VALUES_FILE" "$ENV_VALUES_FILE")"
+            IMAGE_REPOSITORY_PREFIX="$(read_image_value_from_files repositoryPrefix "$SERVICE_VALUES_FILE" "$ENV_VALUES_FILE")"
+            IMAGE_TAG="$(read_image_value_from_files tag "$SERVICE_VALUES_FILE" "$ENV_VALUES_FILE")"
+            if [ -z "$IMAGE_REPOSITORY" ]; then
+              if [ -z "$IMAGE_REPOSITORY_PREFIX" ]; then
+                echo "Missing image.repository or image.repositoryPrefix in $SERVICE_VALUES_FILE / $ENV_VALUES_FILE" >&2
+                exit 1
+              fi
+              IMAGE_REPOSITORY="${IMAGE_REPOSITORY_PREFIX%-}-${SERVICE}"
+            fi
+            if [ -z "$IMAGE_TAG" ]; then
+              echo "Missing image.tag in $SERVICE_VALUES_FILE" >&2
+              exit 1
+            fi
+            SERVICE_TYPE="ClusterIP"
+            INGRESS_ENABLED="false"
+            if [ "$SERVICE" = "api-gateway" ]; then
+              if [ -n "${DOMAIN_NAME:-}" ] && [ -n "${ACM_CERTIFICATE_ARN:-}" ]; then
+                SERVICE_TYPE="ClusterIP"
+                INGRESS_ENABLED="true"
+              else
+                SERVICE_TYPE="LoadBalancer"
+                INGRESS_ENABLED="false"
+              fi
+            fi
+            echo "----------------------------------------"
+            echo "Deploying service: $SERVICE"
+            echo "Image: ${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+            echo "Service type: $SERVICE_TYPE"
+            echo "Ingress enabled: $INGRESS_ENABLED"
+            echo "----------------------------------------"
+            echo "Rendered image:"
+            helm template "$SERVICE" "$SERVICE_CHART" \
+              --namespace "$APP_NAMESPACE" \
+              -f "$ENV_VALUES_FILE" \
+              -f "$SERVICE_VALUES_FILE" \
+              --set "image.registry=$IMAGE_REGISTRY" \
+              --set "image.repository=$IMAGE_REPOSITORY" \
+              --set "image.tag=$IMAGE_TAG" \
+              --set "service.type=$SERVICE_TYPE" \
+              --set "ingress.enabled=$INGRESS_ENABLED" | grep "image:" || true
+            STATUS="not-found"
+            if helm status "$SERVICE" --namespace "$APP_NAMESPACE" >/dev/null 2>&1; then
+              STATUS="$(helm status "$SERVICE" \
+                --namespace "$APP_NAMESPACE" \
+                --output json | jq -r '.info.status')"
+            fi
+            echo "Current Helm status for $SERVICE: $STATUS"
+            if [ "$STATUS" = "failed" ] || \
+               [ "$STATUS" = "pending-install" ] || \
+               [ "$STATUS" = "pending-upgrade" ] || \
+               [ "$STATUS" = "pending-rollback" ] || \
+               [ "$STATUS" = "uninstalling" ] || \
+               [ "$STATUS" = "uninstalled" ]; then
+              echo "Cleaning broken release: $SERVICE"
+              helm uninstall "$SERVICE" \
+                --namespace "$APP_NAMESPACE" \
+                --no-hooks || true
+              kubectl delete secret \
+                --namespace "$APP_NAMESPACE" \
+                -l "owner=helm,name=${SERVICE}" || true
+            fi
+            HELM_ARGS=(
+              upgrade --install "$SERVICE" "$SERVICE_CHART"
+              --namespace "$APP_NAMESPACE"
+              --create-namespace
+              --wait
+              --timeout 15m
+              --cleanup-on-fail
+              -f "$ENV_VALUES_FILE"
+              -f "$SERVICE_VALUES_FILE"
+              --set "image.registry=$IMAGE_REGISTRY"
+              --set "image.repository=$IMAGE_REPOSITORY"
+              --set "image.tag=$IMAGE_TAG"
+              --set "service.type=$SERVICE_TYPE"
+              --set "ingress.enabled=$INGRESS_ENABLED"
+            )
+            if [ "$SERVICE" = "api-gateway" ] && [ "$INGRESS_ENABLED" = "true" ]; then
+              HELM_ARGS+=(
+                --set "ingress.host=$DOMAIN_NAME"
+                --set "ingress.certificateArn=$ACM_CERTIFICATE_ARN"
+              )
+            fi
+            if ! helm "${HELM_ARGS[@]}"; then
+              echo "Helm deployment failed for $SERVICE"
+              echo "Showing debug information..."
+              kubectl get pods -n "$APP_NAMESPACE" -o wide || true
+              kubectl describe pods -n "$APP_NAMESPACE" \
+                -l "app.kubernetes.io/instance=${SERVICE}" || true
+              kubectl get events -n "$APP_NAMESPACE" \
+                --sort-by=.lastTimestamp | tail -80 || true
+              exit 1
+            fi
+            echo "$SERVICE deployed successfully."
+          done
+      - name: Wait for public endpoint
+        id: endpoint
+        if: contains(steps.context.outputs.services, 'api-gateway')
+        run: |
+          set -euo pipefail
+          if [ -n "${DOMAIN_NAME:-}" ] && [ -n "${ACM_CERTIFICATE_ARN:-}" ]; then
+            for _ in $(seq 1 40); do
+              PUBLIC_HOST="$(kubectl get ingress api-gateway \
+                --namespace "$APP_NAMESPACE" \
+                --output jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+              if [ -n "$PUBLIC_HOST" ]; then
+                echo "public_host=$PUBLIC_HOST" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              sleep 15
+            done
+            echo "Ingress hostname was not assigned within the timeout window." >&2
+            exit 1
+          fi
+          for _ in $(seq 1 40); do
+            PUBLIC_HOST="$(kubectl get service api-gateway \
+              --namespace "$APP_NAMESPACE" \
+              --output jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+            if [ -n "$PUBLIC_HOST" ]; then
+              echo "public_host=$PUBLIC_HOST" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "Service LoadBalancer hostname was not assigned within the timeout window." >&2
+          exit 1
+      - name: Deployment summary
+        if: always()
+        env:
+          SERVICES: ${{ steps.context.outputs.services }}
+          PUBLIC_HOST: ${{ steps.endpoint.outputs.public_host }}
+        run: |
+          echo "### Petclinic deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Cluster: \`$CLUSTER_NAME\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Namespace: \`$APP_NAMESPACE\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Environment: \`${{ steps.context.outputs.deploy_env }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Services deployed: \`${SERVICES:-none}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Public hostname: \`${PUBLIC_HOST:-none}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Helm releases:"
+          helm list -n "$APP_NAMESPACE" --all || true
+          echo ""
+          echo "Pods:"
+          kubectl get pods -n "$APP_NAMESPACE" -o wide || true
+          echo ""
+          echo "Services:"
+          kubectl get svc -n "$APP_NAMESPACE" || true
+          echo ""
+          echo "Ingress:"
+          kubectl get ingress -n "$APP_NAMESPACE" || true

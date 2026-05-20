@@ -1,0 +1,1005 @@
+name: Platform
+
+run-name: Platform ${{ github.event.inputs.action || 'plan' }} (${{ github.event.inputs.environment || 'dev' }})
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "terraform/**"
+      - "helm/petclinic-secrets/**"
+      - "helm-values/secrets-*.yaml"
+      - "k8s/argocd/**"
+      - ".github/scripts/force-clean-vpc-dependencies.sh"
+      - ".github/workflows/platform.yaml"
+  push:
+    branches:
+      - main
+    paths:
+      - "terraform/**"
+      - "helm/petclinic-secrets/**"
+      - "helm-values/secrets-*.yaml"
+      - "k8s/argocd/**"
+      - ".github/scripts/force-clean-vpc-dependencies.sh"
+      - ".github/workflows/platform.yaml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Platform environment to manage.
+        required: true
+        type: choice
+        default: dev
+        options:
+          - dev
+          - prod
+      action:
+        description: Terraform action to run.
+        required: true
+        type: choice
+        default: plan
+        options:
+          - plan
+          - apply
+          - destroy
+      bootstrap_gitops:
+        description: Apply ArgoCD apps and runtime secrets after Terraform apply.
+        required: true
+        type: boolean
+        default: true
+      force_destroy_cleanup:
+        description: Force cleanup leftover Kubernetes finalizers, ALBs, and VPC dependencies during destroy.
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: platform-${{ github.event.inputs.environment || 'dev' }}
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: true
+  TF_INPUT: false
+  TF_VERSION: 1.10.5
+  DEPLOY_ENV: ${{ github.event.inputs.environment || 'dev' }}
+  TF_WORKING_DIR: terraform/environments/${{ github.event.inputs.environment || 'dev' }}
+  TF_VARS_FILE: terraform.tfvars
+
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
+  AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN || secrets.AWS_ROLE_TO_ASSUME || vars.AWS_ROLE_ARN || '' }}
+
+  DEFAULT_CLUSTER_NAME: petclinic-${{ github.event.inputs.environment || 'dev' }}-eks
+  DEFAULT_APP_NAMESPACE: petclinic-${{ github.event.inputs.environment || 'dev' }}
+  ARGOCD_NAMESPACE: argocd
+  SECRETS_CHART: helm/petclinic-secrets
+  SECRETS_RELEASE_NAME: petclinic-secrets
+
+  TF_VAR_create_openai_secret: "false"
+  TF_VAR_github_actions_role_arn: ${{ secrets.AWS_ROLE_ARN || secrets.AWS_ROLE_TO_ASSUME || vars.AWS_ROLE_ARN || '' }}
+  TF_VAR_argocd_repo_url: https://github.com/Goodnessoj/platform-petclinic.git
+  TF_VAR_argocd_repo_token: ${{ secrets.ARGOCD_REPO_TOKEN || '' }}
+  FORCE_DESTROY_CLEANUP: ${{ github.event.inputs.force_destroy_cleanup || 'false' }}
+
+jobs:
+  platform:
+    name: ${{ github.event.inputs.action || 'plan' }} ${{ github.event.inputs.environment || 'dev' }} platform
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.inputs.environment || 'dev' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve run mode
+        id: mode
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ACTION="${{ github.event.inputs.action || '' }}"
+          BOOTSTRAP_GITOPS="${{ github.event.inputs.bootstrap_gitops || 'true' }}"
+
+          case "$DEPLOY_ENV" in
+            dev|prod)
+              ;;
+            *)
+              echo "Unsupported environment: $DEPLOY_ENV" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ -z "$ACTION" ]; then
+            ACTION="plan"
+          fi
+
+          if [ "$ACTION" != "plan" ] && \
+             [ "$ACTION" != "apply" ] && \
+             [ "$ACTION" != "destroy" ]; then
+            echo "Unsupported action: $ACTION" >&2
+            exit 1
+          fi
+
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && \
+             [ "$ACTION" != "plan" ]; then
+            echo "Push and pull_request events may only run plan." >&2
+            exit 1
+          fi
+
+          if [ ! -d "$TF_WORKING_DIR" ]; then
+            echo "Terraform environment directory is missing: $TF_WORKING_DIR" >&2
+            exit 1
+          fi
+
+          if [ "$ACTION" = "destroy" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "Destroy may only run from workflow_dispatch." >&2
+            exit 1
+          fi
+
+          echo "environment=$DEPLOY_ENV" >> "$GITHUB_OUTPUT"
+          echo "action=$ACTION" >> "$GITHUB_OUTPUT"
+          echo "bootstrap_gitops=$BOOTSTRAP_GITOPS" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Set up kubectl
+        if: steps.mode.outputs.action == 'destroy' || (steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true')
+        uses: azure/setup-kubectl@v4
+
+      - name: Set up Helm
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: gha-platform-${{ env.DEPLOY_ENV }}-${{ github.run_id }}
+          unset-current-credentials: true
+
+      - name: Confirm AWS identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Terraform format check
+        run: terraform fmt -check -recursive terraform
+
+      - name: Terraform init
+        run: terraform -chdir="$TF_WORKING_DIR" init -input=false
+
+      - name: Remove legacy aws-auth state binding
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          AWS_AUTH_ADDRESS="kubernetes_config_map_v1_data.aws_auth"
+          STATE_LIST="$(terraform -chdir="$TF_WORKING_DIR" state list 2>/dev/null || true)"
+
+          if printf '%s\n' "$STATE_LIST" | grep -Fxq "$AWS_AUTH_ADDRESS"; then
+            terraform -chdir="$TF_WORKING_DIR" state rm "$AWS_AUTH_ADDRESS"
+            echo "Removed $AWS_AUTH_ADDRESS from Terraform state; the live ConfigMap was not deleted."
+          else
+            echo "$AWS_AUTH_ADDRESS is not in Terraform state."
+          fi
+
+      - name: Ensure EKS access for Terraform
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CLUSTER_NAME="$(terraform -chdir="$TF_WORKING_DIR" output -raw eks_cluster_name 2>/dev/null || true)"
+          if [ -z "$CLUSTER_NAME" ]; then
+            CLUSTER_NAME="$DEFAULT_CLUSTER_NAME"
+          fi
+
+          if ! aws eks describe-cluster \
+            --name "$CLUSTER_NAME" \
+            --region "$AWS_REGION" >/dev/null 2>&1; then
+            echo "EKS cluster $CLUSTER_NAME does not exist yet; skipping access bootstrap."
+            exit 0
+          fi
+
+          PRINCIPAL_ARN="${AWS_ROLE_ARN:-}"
+          if [ -z "$PRINCIPAL_ARN" ]; then
+            CALLER_ARN="$(aws sts get-caller-identity --query Arn --output text)"
+            ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+            PARTITION="$(printf '%s' "$CALLER_ARN" | cut -d: -f2)"
+
+            if [[ "$CALLER_ARN" == arn:*:sts::*:assumed-role/* ]]; then
+              ROLE_NAME="$(printf '%s' "$CALLER_ARN" | sed -E 's#^arn:[^:]+:sts::[0-9]+:assumed-role/([^/]+)/.*#\1#')"
+              PRINCIPAL_ARN="arn:${PARTITION}:iam::${ACCOUNT_ID}:role/${ROLE_NAME}"
+            else
+              PRINCIPAL_ARN="$CALLER_ARN"
+            fi
+          fi
+
+          echo "TF_VAR_github_actions_role_arn=$PRINCIPAL_ARN" >> "$GITHUB_ENV"
+
+          AUTH_MODE="$(aws eks describe-cluster \
+            --name "$CLUSTER_NAME" \
+            --region "$AWS_REGION" \
+            --query 'cluster.accessConfig.authenticationMode' \
+            --output text)"
+
+          if [ "$AUTH_MODE" = "CONFIG_MAP" ]; then
+            UPDATE_ID="$(aws eks update-cluster-config \
+              --name "$CLUSTER_NAME" \
+              --region "$AWS_REGION" \
+              --access-config authenticationMode=API_AND_CONFIG_MAP \
+              --query 'update.id' \
+              --output text)"
+
+            for _ in $(seq 1 60); do
+              UPDATE_STATUS="$(aws eks describe-update \
+                --name "$CLUSTER_NAME" \
+                --region "$AWS_REGION" \
+                --update-id "$UPDATE_ID" \
+                --query 'update.status' \
+                --output text)"
+
+              case "$UPDATE_STATUS" in
+                Successful)
+                  break
+                  ;;
+                Failed|Cancelled)
+                  aws eks describe-update \
+                    --name "$CLUSTER_NAME" \
+                    --region "$AWS_REGION" \
+                    --update-id "$UPDATE_ID"
+                  exit 1
+                  ;;
+              esac
+
+              sleep 10
+            done
+
+            AUTH_MODE="$(aws eks describe-cluster \
+              --name "$CLUSTER_NAME" \
+              --region "$AWS_REGION" \
+              --query 'cluster.accessConfig.authenticationMode' \
+              --output text)"
+
+            if [ "$AUTH_MODE" != "API_AND_CONFIG_MAP" ] && [ "$AUTH_MODE" != "API" ]; then
+              echo "Timed out waiting for EKS access entries to be enabled on $CLUSTER_NAME." >&2
+              exit 1
+            fi
+          fi
+
+          CREATE_OUTPUT="$(aws eks create-access-entry \
+            --cluster-name "$CLUSTER_NAME" \
+            --region "$AWS_REGION" \
+            --principal-arn "$PRINCIPAL_ARN" \
+            --type STANDARD 2>&1)" || {
+            if [[ "$CREATE_OUTPUT" != *"ResourceInUseException"* ]]; then
+              echo "$CREATE_OUTPUT" >&2
+              exit 1
+            fi
+          }
+
+          POLICY_ARN="arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          ASSOCIATE_OUTPUT="$(aws eks associate-access-policy \
+            --cluster-name "$CLUSTER_NAME" \
+            --region "$AWS_REGION" \
+            --principal-arn "$PRINCIPAL_ARN" \
+            --policy-arn "$POLICY_ARN" \
+            --access-scope type=cluster 2>&1)" || {
+            if [[ "$ASSOCIATE_OUTPUT" != *"ResourceInUseException"* ]]; then
+              echo "$ASSOCIATE_OUTPUT" >&2
+              exit 1
+            fi
+          }
+
+          sleep 20
+          echo "Ensured EKS cluster-admin access for $PRINCIPAL_ARN on $CLUSTER_NAME."
+
+      - name: Terraform validate
+        run: terraform -chdir="$TF_WORKING_DIR" validate -no-color
+
+      - name: Terraform plan
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PLAN_ARGS=(
+            -input=false
+            -no-color
+            -lock-timeout=5m
+          )
+
+          if [ -f "$TF_WORKING_DIR/$TF_VARS_FILE" ]; then
+            PLAN_ARGS+=(-var-file="$TF_VARS_FILE")
+          else
+            echo "No $TF_VARS_FILE found for $DEPLOY_ENV; using Terraform defaults."
+          fi
+
+          if [ "${{ steps.mode.outputs.action }}" = "destroy" ]; then
+            terraform -chdir="$TF_WORKING_DIR" plan -destroy "${PLAN_ARGS[@]}"
+          else
+            terraform -chdir="$TF_WORKING_DIR" plan "${PLAN_ARGS[@]}" -out=tfplan
+          fi
+
+      - name: Export destroy Kubernetes context
+        if: github.event_name == 'workflow_dispatch' && steps.mode.outputs.action == 'destroy'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          safe_env() {
+            local name="$1"
+            local value="${2:-}"
+
+            value="${value//$'\r'/}"
+            value="$(printf '%s\n' "$value" | sed -n '1p')"
+
+            case "$value" in
+              *"Warning:"*|*"No outputs found"*|*"│"*|"None"|"null")
+                value=""
+                ;;
+            esac
+
+            printf '%s=%s\n' "$name" "$value" >> "$GITHUB_ENV"
+          }
+
+          TF_OUTPUT_JSON="$(terraform -chdir="$TF_WORKING_DIR" output -json 2>/dev/null || true)"
+          if ! printf '%s' "$TF_OUTPUT_JSON" | jq empty >/dev/null 2>&1; then
+            TF_OUTPUT_JSON="{}"
+          fi
+
+          TF_STATE_JSON="$(terraform -chdir="$TF_WORKING_DIR" state pull 2>/dev/null || true)"
+          if ! printf '%s' "$TF_STATE_JSON" | jq empty >/dev/null 2>&1; then
+            TF_STATE_JSON="{}"
+          fi
+
+          tf_output_value() {
+            local name="$1"
+
+            printf '%s' "$TF_OUTPUT_JSON" | jq -r --arg name "$name" \
+              '.[$name].value // empty' 2>/dev/null | sed -n '1p'
+          }
+
+          state_acm_certificate_arn() {
+            local module_regex="$1"
+
+            printf '%s' "$TF_STATE_JSON" | jq -r --arg module_regex "$module_regex" '
+              .resources[]?
+              | select(.type == "aws_acm_certificate" and .name == "main")
+              | select(((.module // "") | test($module_regex)))
+              | .instances[]?.attributes.arn // empty
+            ' 2>/dev/null | sed -n '1p'
+          }
+
+          state_resource_id() {
+            local module_name="$1"
+            local resource_type="$2"
+            local resource_name="$3"
+
+            printf '%s' "$TF_STATE_JSON" | jq -r \
+              --arg module_name "$module_name" \
+              --arg resource_type "$resource_type" \
+              --arg resource_name "$resource_name" '
+              .resources[]?
+              | select((.module // "") == $module_name)
+              | select(.type == $resource_type and .name == $resource_name)
+              | .instances[]?.attributes.id // empty
+            ' 2>/dev/null | sed -n '1p'
+          }
+
+          CLUSTER_NAME="$(tf_output_value eks_cluster_name)"
+          VPC_ID="$(tf_output_value vpc_id)"
+          APP_NAMESPACE="$(tf_output_value application_namespace)"
+          ACM_CERTIFICATE_ARN="$(tf_output_value acm_certificate_arn)"
+          ZIPKIN_ACM_CERTIFICATE_ARN="$(tf_output_value zipkin_acm_certificate_arn)"
+
+          if [ -z "$VPC_ID" ]; then
+            VPC_ID="$(state_resource_id module.vpc aws_vpc main)"
+          fi
+
+          if [ -z "$VPC_ID" ]; then
+            VPC_ID="$(aws ec2 describe-vpcs \
+              --region "$AWS_REGION" \
+              --filters "Name=tag:Name,Values=petclinic-${DEPLOY_ENV}-vpc" "Name=tag:Project,Values=petclinic" \
+              --query 'Vpcs[0].VpcId' \
+              --output text 2>/dev/null || true)"
+          fi
+
+          if [ -z "$ACM_CERTIFICATE_ARN" ]; then
+            ACM_CERTIFICATE_ARN="$(state_acm_certificate_arn '^module\.dns_ingress(\[0\])?$')"
+          fi
+
+          if [ -z "$ZIPKIN_ACM_CERTIFICATE_ARN" ]; then
+            ZIPKIN_ACM_CERTIFICATE_ARN="$(state_acm_certificate_arn '^module\.zipkin_dns_ingress(\[0\])?$')"
+          fi
+
+          if [ -z "$CLUSTER_NAME" ]; then
+            CLUSTER_NAME="$DEFAULT_CLUSTER_NAME"
+          fi
+
+          if [ -z "$APP_NAMESPACE" ]; then
+            APP_NAMESPACE="$DEFAULT_APP_NAMESPACE"
+          fi
+
+          safe_env CLUSTER_NAME "$CLUSTER_NAME"
+          safe_env VPC_ID "$VPC_ID"
+          safe_env APP_NAMESPACE "$APP_NAMESPACE"
+          safe_env ACM_CERTIFICATE_ARN "$ACM_CERTIFICATE_ARN"
+          safe_env ZIPKIN_ACM_CERTIFICATE_ARN "$ZIPKIN_ACM_CERTIFICATE_ARN"
+
+      - name: Update kubeconfig for destroy cleanup
+        if: github.event_name == 'workflow_dispatch' && steps.mode.outputs.action == 'destroy'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! aws eks describe-cluster \
+            --name "$CLUSTER_NAME" \
+            --region "$AWS_REGION" >/dev/null 2>&1; then
+            echo "EKS cluster $CLUSTER_NAME does not exist; skipping Kubernetes cleanup."
+            exit 0
+          fi
+
+          aws eks update-kubeconfig \
+            --name "$CLUSTER_NAME" \
+            --region "$AWS_REGION"
+
+          kubectl config current-context
+
+      - name: Pre-clean Kubernetes resources before destroy
+        if: github.event_name == 'workflow_dispatch' && steps.mode.outputs.action == 'destroy'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! kubectl auth can-i get namespaces >/dev/null 2>&1; then
+            echo "Kubernetes is not reachable; skipping GitOps ingress cleanup."
+            exit 0
+          fi
+
+          if kubectl get crd applications.argoproj.io >/dev/null 2>&1 && \
+             kubectl get namespace "$ARGOCD_NAMESPACE" >/dev/null 2>&1; then
+            for SERVICE in \
+              config-server \
+              discovery-server \
+              customers-service \
+              vets-service \
+              visits-service \
+              genai-service \
+              api-gateway \
+              admin-server; do
+              kubectl delete application "${SERVICE}-${DEPLOY_ENV}" \
+                --namespace "$ARGOCD_NAMESPACE" \
+                --ignore-not-found \
+                --wait=false || true
+            done
+          fi
+
+          if kubectl get crd externalsecrets.external-secrets.io >/dev/null 2>&1 && \
+             kubectl get namespace "$APP_NAMESPACE" >/dev/null 2>&1; then
+            kubectl delete externalsecret --all \
+              --namespace "$APP_NAMESPACE" \
+              --ignore-not-found \
+              --wait=false || true
+
+            for EXTERNAL_SECRET in $(kubectl get externalsecret \
+              --namespace "$APP_NAMESPACE" \
+              -o name 2>/dev/null || true); do
+              kubectl patch "$EXTERNAL_SECRET" \
+                --namespace "$APP_NAMESPACE" \
+                --type=json \
+                -p='[{"op":"remove","path":"/metadata/finalizers"}]' || true
+            done
+          fi
+
+          for NAMESPACE in "$APP_NAMESPACE" "$ARGOCD_NAMESPACE" monitoring tracing; do
+            if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
+              kubectl delete ingress --all \
+                --namespace "$NAMESPACE" \
+                --ignore-not-found \
+                --wait=true \
+                --timeout=10m || true
+
+              if [ "${FORCE_DESTROY_CLEANUP:-false}" = "true" ]; then
+                while read -r INGRESS_NAME; do
+                  if [ -n "${INGRESS_NAME:-}" ]; then
+                    kubectl patch ingress "$INGRESS_NAME" \
+                      --namespace "$NAMESPACE" \
+                      --type=json \
+                      -p='[{"op":"remove","path":"/metadata/finalizers"}]' || true
+                  fi
+                done < <(kubectl get ingress \
+                  --namespace "$NAMESPACE" \
+                  -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+              fi
+            fi
+          done
+
+          if kubectl get crd targetgroupbindings.elbv2.k8s.aws >/dev/null 2>&1; then
+            kubectl delete targetgroupbinding --all \
+              --all-namespaces \
+              --ignore-not-found \
+              --wait=false || true
+
+            while read -r TGB_NAMESPACE TGB_NAME; do
+              if [ -n "${TGB_NAMESPACE:-}" ] && [ -n "${TGB_NAME:-}" ]; then
+                kubectl patch targetgroupbinding "$TGB_NAME" \
+                  --namespace "$TGB_NAMESPACE" \
+                  --type=json \
+                  -p='[{"op":"remove","path":"/metadata/finalizers"}]' || true
+              fi
+            done < <(kubectl get targetgroupbinding \
+              --all-namespaces \
+              -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+
+            for _ in $(seq 1 60); do
+              REMAINING_TARGET_GROUP_BINDINGS="$(kubectl get targetgroupbinding \
+                --all-namespaces \
+                --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+
+              if [ "$REMAINING_TARGET_GROUP_BINDINGS" = "0" ]; then
+                echo "All TargetGroupBindings have been removed."
+                break
+              fi
+
+              echo "Waiting for $REMAINING_TARGET_GROUP_BINDINGS TargetGroupBinding resource(s) to disappear..."
+              sleep 10
+            done
+
+            REMAINING_TARGET_GROUP_BINDINGS="$(kubectl get targetgroupbinding \
+              --all-namespaces \
+              --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+
+            if [ "$REMAINING_TARGET_GROUP_BINDINGS" != "0" ]; then
+              kubectl get targetgroupbinding --all-namespaces -o wide || true
+              echo "Timed out waiting for TargetGroupBindings to disappear." >&2
+              exit 1
+            fi
+          fi
+
+          echo "Kubernetes pre-destroy cleanup completed."
+
+      - name: Destroy Terraform-managed ingresses first
+        if: github.event_name == 'workflow_dispatch' && steps.mode.outputs.action == 'destroy'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DESTROY_ARGS=(
+            -input=false
+            -auto-approve
+            -lock-timeout=5m
+          )
+
+          if [ -f "$TF_WORKING_DIR/$TF_VARS_FILE" ]; then
+            DESTROY_ARGS+=(-var-file="$TF_VARS_FILE")
+          fi
+
+          STATE_LIST="$(terraform -chdir="$TF_WORKING_DIR" state list 2>/dev/null || true)"
+          TARGET_ARGS=()
+          TARGET_CANDIDATES=(
+            "module.addons.kubernetes_ingress_v1.argocd[0]"
+            "module.addons.kubernetes_ingress_v1.grafana[0]"
+            "module.addons.kubernetes_ingress_v1.prometheus[0]"
+            "module.addons.kubernetes_ingress_v1.zipkin[0]"
+            "module.addons.aws_route53_record.argocd[0]"
+            "module.addons.aws_route53_record.grafana[0]"
+            "module.addons.aws_route53_record.prometheus[0]"
+            "module.addons.aws_route53_record.zipkin[0]"
+          )
+
+          for ADDRESS in "${TARGET_CANDIDATES[@]}"; do
+            if printf '%s\n' "$STATE_LIST" | grep -Fxq "$ADDRESS"; then
+              TARGET_ARGS+=(-target="$ADDRESS")
+            fi
+          done
+
+          if [ "${#TARGET_ARGS[@]}" -eq 0 ]; then
+            echo "No Terraform-managed platform ingress or DNS alias resources found in state."
+            exit 0
+          fi
+
+          terraform -chdir="$TF_WORKING_DIR" destroy "${DESTROY_ARGS[@]}" "${TARGET_ARGS[@]}"
+
+      - name: Force-delete leftover load balancers
+        if: github.event_name == 'workflow_dispatch' && steps.mode.outputs.action == 'destroy' && github.event.inputs.force_destroy_cleanup != 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          LOAD_BALANCER_ARNS=()
+
+          add_load_balancer_arn() {
+            local arn="${1:-}"
+
+            if [ -n "$arn" ]; then
+              LOAD_BALANCER_ARNS+=("$arn")
+            fi
+          }
+
+          add_in_use_load_balancers() {
+            local certificate_arn="${1:-}"
+
+            if [ -z "$certificate_arn" ]; then
+              return 0
+            fi
+
+            while read -r in_use_arn; do
+              if [ -z "${in_use_arn:-}" ]; then
+                continue
+              fi
+
+              if [[ "$in_use_arn" == *":loadbalancer/"* ]]; then
+                add_load_balancer_arn "$in_use_arn"
+              elif [[ "$in_use_arn" == *":listener/"* ]]; then
+                add_load_balancer_arn "$(printf '%s' "$in_use_arn" | sed -E 's#:listener/(app|net)/([^/]+/[^/]+)/[^/]+$#:loadbalancer/\1/\2#')"
+              else
+                echo "ACM certificate is still used by a non-ELB resource: $in_use_arn"
+              fi
+            done < <(aws acm describe-certificate \
+              --region "$AWS_REGION" \
+              --certificate-arn "$certificate_arn" \
+              --query 'Certificate.InUseBy[]' \
+              --output text 2>/dev/null | tr '\t' '\n' || true)
+          }
+
+          add_in_use_load_balancers "${ACM_CERTIFICATE_ARN:-}"
+          add_in_use_load_balancers "${ZIPKIN_ACM_CERTIFICATE_ARN:-}"
+
+          while read -r cluster_lb_arn; do
+            add_load_balancer_arn "$cluster_lb_arn"
+          done < <(aws resourcegroupstaggingapi get-resources \
+            --region "$AWS_REGION" \
+            --resource-type-filters elasticloadbalancing:loadbalancer \
+            --tag-filters "Key=elbv2.k8s.aws/cluster,Values=$CLUSTER_NAME" \
+            --query 'ResourceTagMappingList[].ResourceARN' \
+            --output text 2>/dev/null | tr '\t' '\n' || true)
+
+          if [ "${#LOAD_BALANCER_ARNS[@]}" -eq 0 ]; then
+            echo "No leftover load balancers found for force cleanup."
+            exit 0
+          fi
+
+          printf '%s\n' "${LOAD_BALANCER_ARNS[@]}" | sort -u | while read -r load_balancer_arn; do
+            if [ -n "$load_balancer_arn" ]; then
+              echo "Force deleting load balancer: $load_balancer_arn"
+              aws elbv2 delete-load-balancer \
+                --region "$AWS_REGION" \
+                --load-balancer-arn "$load_balancer_arn" || true
+            fi
+          done
+
+          printf '%s\n' "${LOAD_BALANCER_ARNS[@]}" | sort -u | while read -r load_balancer_arn; do
+            if [ -n "$load_balancer_arn" ]; then
+              aws elbv2 wait load-balancers-deleted \
+                --region "$AWS_REGION" \
+                --load-balancer-arns "$load_balancer_arn" || true
+            fi
+          done
+
+      - name: Wait for ACM certificates to detach
+        if: github.event_name == 'workflow_dispatch' && steps.mode.outputs.action == 'destroy'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CERTIFICATE_ARNS=()
+
+          if [ -n "${ACM_CERTIFICATE_ARN:-}" ]; then
+            CERTIFICATE_ARNS+=("$ACM_CERTIFICATE_ARN")
+          fi
+
+          if [ -n "${ZIPKIN_ACM_CERTIFICATE_ARN:-}" ]; then
+            CERTIFICATE_ARNS+=("$ZIPKIN_ACM_CERTIFICATE_ARN")
+          fi
+
+          if [ "${#CERTIFICATE_ARNS[@]}" -eq 0 ]; then
+            echo "No ACM certificate outputs found; skipping certificate detach wait."
+            exit 0
+          fi
+
+          for CERTIFICATE_ARN in "${CERTIFICATE_ARNS[@]}"; do
+            echo "Waiting for ACM certificate to detach: $CERTIFICATE_ARN"
+
+            for _ in $(seq 1 90); do
+              IN_USE_COUNT="$(aws acm describe-certificate \
+                --region "$AWS_REGION" \
+                --certificate-arn "$CERTIFICATE_ARN" \
+                --query 'length(Certificate.InUseBy)' \
+                --output text 2>/dev/null || echo MISSING)"
+
+              if [ "$IN_USE_COUNT" = "MISSING" ]; then
+                echo "ACM certificate is already gone or unavailable: $CERTIFICATE_ARN"
+                break
+              fi
+
+              if [ "$IN_USE_COUNT" = "0" ]; then
+                echo "ACM certificate is detached: $CERTIFICATE_ARN"
+                break
+              fi
+
+              echo "Waiting for $CERTIFICATE_ARN to detach from $IN_USE_COUNT load balancer listener(s)..."
+              sleep 10
+            done
+
+            IN_USE_COUNT="$(aws acm describe-certificate \
+              --region "$AWS_REGION" \
+              --certificate-arn "$CERTIFICATE_ARN" \
+              --query 'length(Certificate.InUseBy)' \
+              --output text 2>/dev/null || echo MISSING)"
+
+            if [ "$IN_USE_COUNT" != "0" ] && [ "$IN_USE_COUNT" != "MISSING" ]; then
+              aws acm describe-certificate \
+                --region "$AWS_REGION" \
+                --certificate-arn "$CERTIFICATE_ARN" \
+                --query 'Certificate.InUseBy' \
+                --output text || true
+
+              echo "Timed out waiting for ACM certificate detach: $CERTIFICATE_ARN" >&2
+              exit 1
+            fi
+          done
+
+      - name: Terraform apply
+        if: github.event_name == 'workflow_dispatch' && steps.mode.outputs.action == 'apply'
+        run: terraform -chdir="$TF_WORKING_DIR" apply -input=false -auto-approve tfplan
+
+      - name: Terraform destroy
+        if: github.event_name == 'workflow_dispatch' && steps.mode.outputs.action == 'destroy'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DESTROY_ARGS=(
+            -input=false
+            -auto-approve
+            -lock-timeout=5m
+          )
+
+          if [ -f "$TF_WORKING_DIR/$TF_VARS_FILE" ]; then
+            DESTROY_ARGS+=(-var-file="$TF_VARS_FILE")
+          fi
+
+          run_destroy() {
+            terraform -chdir="$TF_WORKING_DIR" destroy "${DESTROY_ARGS[@]}"
+          }
+
+          set +e
+          run_destroy
+          DESTROY_STATUS=$?
+          set -e
+
+          if [ "$DESTROY_STATUS" -eq 0 ]; then
+            exit 0
+          fi
+
+          if [ "${FORCE_DESTROY_CLEANUP:-false}" != "true" ]; then
+            exit "$DESTROY_STATUS"
+          fi
+
+          echo "Terraform destroy failed. Force-cleaning VPC dependencies before one retry."
+          bash .github/scripts/force-clean-vpc-dependencies.sh
+
+          run_destroy
+
+      - name: Export Terraform outputs
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CLUSTER_NAME="$(terraform -chdir="$TF_WORKING_DIR" output -raw eks_cluster_name 2>/dev/null || true)"
+          APP_NAMESPACE="$(terraform -chdir="$TF_WORKING_DIR" output -raw application_namespace 2>/dev/null || true)"
+
+          if [ -z "$CLUSTER_NAME" ]; then
+            CLUSTER_NAME="$DEFAULT_CLUSTER_NAME"
+          fi
+
+          if [ -z "$APP_NAMESPACE" ]; then
+            APP_NAMESPACE="$DEFAULT_APP_NAMESPACE"
+          fi
+
+          echo "CLUSTER_NAME=$CLUSTER_NAME" >> "$GITHUB_ENV"
+          echo "APP_NAMESPACE=$APP_NAMESPACE" >> "$GITHUB_ENV"
+
+      - name: Update kubeconfig
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
+        run: |
+          aws eks update-kubeconfig \
+            --name "$CLUSTER_NAME" \
+            --region "$AWS_REGION"
+
+          kubectl config current-context
+
+      - name: Verify Kubernetes authentication
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
+        run: |
+          kubectl auth can-i get namespaces
+          kubectl get nodes
+
+      - name: Create app namespace
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
+        run: |
+          kubectl create namespace "$APP_NAMESPACE" \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+
+      - name: Validate External Secrets prerequisites
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SECRETS_VALUES_FILE="helm-values/secrets-${DEPLOY_ENV}.yaml"
+          CLUSTER_SECRET_STORE="$(awk '/^[[:space:]]*secretStoreName:/ { print $2; exit }' "$SECRETS_VALUES_FILE")"
+
+          if [ -z "$CLUSTER_SECRET_STORE" ]; then
+            echo "Unable to resolve secretStoreName from $SECRETS_VALUES_FILE." >&2
+            exit 1
+          fi
+
+          if ! kubectl get crd externalsecrets.external-secrets.io >/dev/null 2>&1; then
+            echo "ExternalSecret CRD is missing. Terraform addons did not finish installing External Secrets." >&2
+            exit 1
+          fi
+
+          if ! kubectl get crd clustersecretstores.external-secrets.io >/dev/null 2>&1; then
+            echo "ClusterSecretStore CRD is missing. Terraform addons did not finish installing External Secrets." >&2
+            exit 1
+          fi
+
+          if ! kubectl get clustersecretstore "$CLUSTER_SECRET_STORE" >/dev/null 2>&1; then
+            echo "ClusterSecretStore '$CLUSTER_SECRET_STORE' is missing. Terraform addons did not finish applying." >&2
+            exit 1
+          fi
+
+      - name: Create or update OpenAI secret
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
+        shell: bash
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "GitHub secret OPENAI_API_KEY is missing or empty." >&2
+            exit 1
+          fi
+
+          kubectl delete externalsecret petclinic-openai-secret \
+            --namespace "$APP_NAMESPACE" \
+            --ignore-not-found
+
+          kubectl delete secret openai-secret \
+            --namespace "$APP_NAMESPACE" \
+            --ignore-not-found
+
+          kubectl create secret generic openai-secret \
+            --namespace "$APP_NAMESPACE" \
+            --from-literal=SPRING_AI_OPENAI_API_KEY="$OPENAI_API_KEY" \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+
+      - name: Install shared ExternalSecrets chart
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
+        run: |
+          helm upgrade --install "$SECRETS_RELEASE_NAME" "$SECRETS_CHART" \
+            --namespace "$APP_NAMESPACE" \
+            --create-namespace \
+            --wait \
+            --timeout 5m \
+            --cleanup-on-fail \
+            -f "helm-values/secrets-${DEPLOY_ENV}.yaml" \
+            --set openai.enabled=false
+
+      - name: Wait for database secret
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
+        run: |
+          set -euo pipefail
+
+          for _ in $(seq 1 40); do
+            if kubectl get secret mysql-secret --namespace "$APP_NAMESPACE" >/dev/null 2>&1; then
+              echo "mysql-secret exists."
+              exit 0
+            fi
+
+            sleep 5
+          done
+
+          kubectl get externalsecret petclinic-db-secret \
+            --namespace "$APP_NAMESPACE" \
+            -o yaml || true
+
+          echo "mysql-secret was not created by External Secrets within the timeout window." >&2
+          exit 1
+
+      - name: Apply ArgoCD applications
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
+        run: |
+          kubectl apply -f k8s/argocd/applications/project.yaml
+          kubectl apply -k "k8s/argocd/applications/$DEPLOY_ENV"
+
+          for SERVICE in \
+            config-server \
+            discovery-server \
+            customers-service \
+            vets-service \
+            visits-service \
+            genai-service \
+            api-gateway \
+            admin-server; do
+            APP="${SERVICE}-${DEPLOY_ENV}"
+            kubectl annotate application "$APP" \
+              --namespace "$ARGOCD_NAMESPACE" \
+              argocd.argoproj.io/refresh=hard \
+              --overwrite
+          done
+
+      - name: Wait for ArgoCD applications
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APPS=(
+            "config-server-${DEPLOY_ENV}"
+            "discovery-server-${DEPLOY_ENV}"
+            "customers-service-${DEPLOY_ENV}"
+            "vets-service-${DEPLOY_ENV}"
+            "visits-service-${DEPLOY_ENV}"
+            "genai-service-${DEPLOY_ENV}"
+            "api-gateway-${DEPLOY_ENV}"
+            "admin-server-${DEPLOY_ENV}"
+          )
+
+          for _ in $(seq 1 60); do
+            READY_COUNT=0
+
+            for APP in "${APPS[@]}"; do
+              STATUS="$(kubectl get application "$APP" \
+                --namespace "$ARGOCD_NAMESPACE" \
+                -o jsonpath='{.status.sync.status} {.status.health.status}' 2>/dev/null || true)"
+
+              if [ "$STATUS" = "Synced Healthy" ]; then
+                READY_COUNT=$((READY_COUNT + 1))
+              fi
+            done
+
+            if [ "$READY_COUNT" -eq "${#APPS[@]}" ]; then
+              kubectl get applications --namespace "$ARGOCD_NAMESPACE" -o wide
+              exit 0
+            fi
+
+            kubectl get applications --namespace "$ARGOCD_NAMESPACE" -o wide
+            sleep 10
+          done
+
+          echo "ArgoCD $DEPLOY_ENV Applications did not become Synced and Healthy in time." >&2
+          kubectl get applications --namespace "$ARGOCD_NAMESPACE" -o wide
+          exit 1
+
+      - name: Workflow summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Platform workflow"
+            echo "- Environment: \`${{ steps.mode.outputs.environment || env.DEPLOY_ENV }}\`"
+            echo "- Action: \`${{ steps.mode.outputs.action || 'plan' }}\`"
+            echo "- Terraform directory: \`$TF_WORKING_DIR\`"
+            if [ -f "$TF_WORKING_DIR/$TF_VARS_FILE" ]; then
+              echo "- Terraform vars: \`$TF_WORKING_DIR/$TF_VARS_FILE\`"
+            else
+              echo "- Terraform vars: Terraform defaults"
+            fi
+            echo "- AWS region: \`$AWS_REGION\`"
+            echo "- GitOps bootstrap: \`${{ steps.mode.outputs.bootstrap_gitops || 'false' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

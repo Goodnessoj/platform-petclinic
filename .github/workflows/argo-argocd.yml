@@ -1,0 +1,542 @@
+name: Deploy ArgoCD
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "k8s/argocd/**"
+      - ".github/workflows/deploy-argocd.yml"
+  repository_dispatch:
+    types:
+      - deploy-argocd
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy ArgoCD applications for.
+        required: true
+        type: choice
+        default: dev
+        options:
+          - dev
+          - prod
+      cluster_name:
+        description: Optional EKS cluster name. Defaults to petclinic-<environment>-eks.
+        required: false
+        type: string
+      chart_version:
+        description: Argo CD Helm chart version.
+        required: false
+        type: string
+        default: 9.5.14
+      apply_applications:
+        description: Apply Petclinic ArgoCD AppProject and Applications.
+        required: true
+        type: boolean
+        default: true
+      wait_applications:
+        description: Wait for Petclinic ArgoCD Applications to become Synced and Healthy.
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-argocd-${{ github.event.client_payload.environment || github.event.inputs.environment || 'dev' }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
+  AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN || secrets.AWS_ROLE_TO_ASSUME || vars.AWS_ROLE_ARN || '' }}
+  ARGOCD_NAMESPACE: argocd
+  ARGOCD_RELEASE_NAME: argocd
+  ARGOCD_CHART_VERSION: ${{ github.event.client_payload.chart_version || github.event.inputs.chart_version || vars.ARGOCD_CHART_VERSION || '9.5.14' }}
+  SECRETS_CHART: helm/petclinic-secrets
+  SECRETS_RELEASE_NAME: petclinic-secrets
+  DEPLOY_ENV: ${{ github.event.client_payload.environment || github.event.inputs.environment || 'dev' }}
+  INPUT_CLUSTER_NAME: ${{ github.event.client_payload.cluster_name || github.event.inputs.cluster_name || '' }}
+  APPLY_APPLICATIONS: ""
+  WAIT_APPLICATIONS: ""
+
+jobs:
+  deploy-argocd:
+    name: Deploy ArgoCD
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.client_payload.environment || github.event.inputs.environment || 'dev' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: gha-argocd-${{ github.run_id }}
+          unset-current-credentials: true
+
+      - name: Resolve deployment context
+        shell: bash
+        env:
+          DISPATCH_APPLY_APPLICATIONS: ${{ github.event.client_payload.apply_applications }}
+          DISPATCH_WAIT_APPLICATIONS: ${{ github.event.client_payload.wait_applications }}
+          DISPATCH_CHANGED_SERVICES: ${{ github.event.client_payload.changed_services || '' }}
+          DISPATCH_SERVICES: ${{ github.event.client_payload.services || '' }}
+          INPUT_APPLY_APPLICATIONS: ${{ github.event.inputs.apply_applications }}
+          INPUT_WAIT_APPLICATIONS: ${{ github.event.inputs.wait_applications }}
+        run: |
+          set -euo pipefail
+
+          case "$DEPLOY_ENV" in
+            dev|prod)
+              ;;
+            *)
+              echo "Unsupported environment: $DEPLOY_ENV" >&2
+              exit 1
+              ;;
+          esac
+
+          CLUSTER_NAME="$INPUT_CLUSTER_NAME"
+
+          if [ -z "$CLUSTER_NAME" ]; then
+            CLUSTER_NAME="petclinic-${DEPLOY_ENV}-eks"
+          fi
+
+          APP_NAMESPACE="petclinic-${DEPLOY_ENV}"
+          SECRETS_VALUES_FILE="helm-values/secrets-${DEPLOY_ENV}.yaml"
+
+          if [ ! -f "$SECRETS_VALUES_FILE" ]; then
+            echo "Missing secrets values file: $SECRETS_VALUES_FILE" >&2
+            exit 1
+          fi
+
+          APPLY_APPLICATIONS="$DISPATCH_APPLY_APPLICATIONS"
+
+          if [ -z "$APPLY_APPLICATIONS" ]; then
+            APPLY_APPLICATIONS="$INPUT_APPLY_APPLICATIONS"
+          fi
+
+          if [ -z "$APPLY_APPLICATIONS" ]; then
+            APPLY_APPLICATIONS="true"
+          fi
+
+          WAIT_APPLICATIONS="$DISPATCH_WAIT_APPLICATIONS"
+
+          if [ -z "$WAIT_APPLICATIONS" ]; then
+            WAIT_APPLICATIONS="$INPUT_WAIT_APPLICATIONS"
+          fi
+
+          if [ -z "$WAIT_APPLICATIONS" ]; then
+            WAIT_APPLICATIONS="true"
+          fi
+
+          case "$APPLY_APPLICATIONS" in
+            true|false)
+              ;;
+            *)
+              echo "apply_applications must be true or false." >&2
+              exit 1
+              ;;
+          esac
+
+          case "$WAIT_APPLICATIONS" in
+            true|false)
+              ;;
+            *)
+              echo "wait_applications must be true or false." >&2
+              exit 1
+              ;;
+          esac
+
+          ALL_SERVICES="config-server discovery-server customers-service vets-service visits-service genai-service api-gateway admin-server"
+          RAW_SERVICES="${DISPATCH_CHANGED_SERVICES:-$DISPATCH_SERVICES}"
+
+          if [ -z "$RAW_SERVICES" ] || [ "$RAW_SERVICES" = "all" ]; then
+            REFRESH_SERVICES="$ALL_SERVICES"
+          else
+            REFRESH_SERVICES="$(printf '%s' "$RAW_SERVICES" | tr ',\n\r\t' '    ' | xargs)"
+          fi
+
+          for SERVICE in $REFRESH_SERVICES; do
+            case "$SERVICE" in
+              config-server|discovery-server|customers-service|vets-service|visits-service|genai-service|api-gateway|admin-server)
+                ;;
+              *)
+                echo "Unsupported service in dispatch payload: $SERVICE" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+          echo "CLUSTER_NAME=$CLUSTER_NAME" >> "$GITHUB_ENV"
+          echo "APP_NAMESPACE=$APP_NAMESPACE" >> "$GITHUB_ENV"
+          echo "SECRETS_VALUES_FILE=$SECRETS_VALUES_FILE" >> "$GITHUB_ENV"
+          echo "APPLY_APPLICATIONS=$APPLY_APPLICATIONS" >> "$GITHUB_ENV"
+          echo "WAIT_APPLICATIONS=$WAIT_APPLICATIONS" >> "$GITHUB_ENV"
+          echo "REFRESH_SERVICES=$REFRESH_SERVICES" >> "$GITHUB_ENV"
+          echo "Cluster: $CLUSTER_NAME"
+          echo "Application namespace: $APP_NAMESPACE"
+          echo "Environment: $DEPLOY_ENV"
+          echo "ArgoCD applications to refresh/wait: $REFRESH_SERVICES"
+
+      - name: Ensure EKS access for workflow role
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! aws eks describe-cluster \
+            --name "$CLUSTER_NAME" \
+            --region "$AWS_REGION" >/dev/null 2>&1; then
+            echo "EKS cluster $CLUSTER_NAME does not exist or is not visible to this workflow role." >&2
+            exit 1
+          fi
+
+          PRINCIPAL_ARN="${AWS_ROLE_ARN:-}"
+
+          if [ -z "$PRINCIPAL_ARN" ]; then
+            CALLER_ARN="$(aws sts get-caller-identity --query Arn --output text)"
+            ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+            PARTITION="$(printf '%s' "$CALLER_ARN" | cut -d: -f2)"
+
+            if [[ "$CALLER_ARN" == arn:*:sts::*:assumed-role/* ]]; then
+              ROLE_NAME="$(printf '%s' "$CALLER_ARN" | sed -E 's#^arn:[^:]+:sts::[0-9]+:assumed-role/([^/]+)/.*#\1#')"
+              PRINCIPAL_ARN="arn:${PARTITION}:iam::${ACCOUNT_ID}:role/${ROLE_NAME}"
+            else
+              PRINCIPAL_ARN="$CALLER_ARN"
+            fi
+          fi
+
+          AUTH_MODE="$(aws eks describe-cluster \
+            --name "$CLUSTER_NAME" \
+            --region "$AWS_REGION" \
+            --query 'cluster.accessConfig.authenticationMode' \
+            --output text)"
+
+          if [ "$AUTH_MODE" = "CONFIG_MAP" ]; then
+            UPDATE_ID="$(aws eks update-cluster-config \
+              --name "$CLUSTER_NAME" \
+              --region "$AWS_REGION" \
+              --access-config authenticationMode=API_AND_CONFIG_MAP \
+              --query 'update.id' \
+              --output text)"
+
+            for _ in $(seq 1 60); do
+              UPDATE_STATUS="$(aws eks describe-update \
+                --name "$CLUSTER_NAME" \
+                --region "$AWS_REGION" \
+                --update-id "$UPDATE_ID" \
+                --query 'update.status' \
+                --output text)"
+
+              case "$UPDATE_STATUS" in
+                Successful)
+                  break
+                  ;;
+                Failed|Cancelled)
+                  aws eks describe-update \
+                    --name "$CLUSTER_NAME" \
+                    --region "$AWS_REGION" \
+                    --update-id "$UPDATE_ID"
+                  exit 1
+                  ;;
+              esac
+
+              sleep 10
+            done
+          fi
+
+          CREATE_OUTPUT="$(aws eks create-access-entry \
+            --cluster-name "$CLUSTER_NAME" \
+            --region "$AWS_REGION" \
+            --principal-arn "$PRINCIPAL_ARN" \
+            --type STANDARD 2>&1)" || {
+            if [[ "$CREATE_OUTPUT" != *"ResourceInUseException"* ]]; then
+              echo "$CREATE_OUTPUT" >&2
+              exit 1
+            fi
+          }
+
+          POLICY_ARN="arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          ASSOCIATE_OUTPUT="$(aws eks associate-access-policy \
+            --cluster-name "$CLUSTER_NAME" \
+            --region "$AWS_REGION" \
+            --principal-arn "$PRINCIPAL_ARN" \
+            --policy-arn "$POLICY_ARN" \
+            --access-scope type=cluster 2>&1)" || {
+            if [[ "$ASSOCIATE_OUTPUT" != *"ResourceInUseException"* ]]; then
+              echo "$ASSOCIATE_OUTPUT" >&2
+              exit 1
+            fi
+          }
+
+          sleep 20
+          echo "Ensured EKS cluster-admin access for $PRINCIPAL_ARN on $CLUSTER_NAME."
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name "$CLUSTER_NAME" \
+            --region "$AWS_REGION"
+
+          kubectl config current-context
+
+      - name: Verify Kubernetes authentication
+        run: |
+          kubectl auth can-i get namespaces
+          kubectl get nodes
+
+      - name: Deploy ArgoCD Helm release
+        run: |
+          set -euo pipefail
+
+          helm repo add argo https://argoproj.github.io/argo-helm
+          helm repo update
+
+          HELM_ARGS=(
+            upgrade --install "$ARGOCD_RELEASE_NAME" argo/argo-cd
+            --namespace "$ARGOCD_NAMESPACE"
+            --create-namespace
+            --wait
+            --timeout 30m
+            --set configs.params.server\\.insecure=true
+            --set redis.serviceAccount.create=true
+            --set redis.serviceAccount.name=argocd-redis
+          )
+
+          if [ -n "${ARGOCD_CHART_VERSION:-}" ]; then
+            HELM_ARGS+=(--version "$ARGOCD_CHART_VERSION")
+          fi
+
+          helm "${HELM_ARGS[@]}"
+
+      - name: Configure ArgoCD RBAC
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/argocd-policy.csv <<'POLICY'
+          p, role:developer, applications, get, petclinic/*, allow
+          p, role:developer, applications, sync, petclinic/*-dev, allow
+          p, role:developer, applications, action/*, petclinic/*-dev, allow
+          p, role:developer, logs, get, petclinic/*, allow
+          p, role:developer, projects, get, petclinic, allow
+          p, role:developer, repositories, get, *, allow
+
+          g, argocd-admins, role:admin
+          g, argocd-developers, role:developer
+          POLICY
+
+          kubectl create configmap argocd-rbac-cm \
+            --namespace "$ARGOCD_NAMESPACE" \
+            --from-literal=policy.default=role:readonly \
+            --from-literal=scopes='[groups]' \
+            --from-file=policy.csv=/tmp/argocd-policy.csv \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+
+      - name: Wait for ArgoCD workloads
+        run: |
+          set -euo pipefail
+
+          kubectl rollout status deployment/argocd-server \
+            --namespace "$ARGOCD_NAMESPACE" \
+            --timeout=300s
+
+          kubectl rollout status deployment/argocd-repo-server \
+            --namespace "$ARGOCD_NAMESPACE" \
+            --timeout=300s
+
+          kubectl rollout status deployment/argocd-applicationset-controller \
+            --namespace "$ARGOCD_NAMESPACE" \
+            --timeout=300s
+
+          kubectl rollout status deployment/argocd-dex-server \
+            --namespace "$ARGOCD_NAMESPACE" \
+            --timeout=300s
+
+          kubectl rollout status deployment/argocd-notifications-controller \
+            --namespace "$ARGOCD_NAMESPACE" \
+            --timeout=300s
+
+          kubectl rollout status deployment/argocd-redis \
+            --namespace "$ARGOCD_NAMESPACE" \
+            --timeout=300s
+
+          kubectl rollout status statefulset/argocd-application-controller \
+            --namespace "$ARGOCD_NAMESPACE" \
+            --timeout=300s
+
+      - name: Create app namespace
+        if: env.APPLY_APPLICATIONS == 'true'
+        run: |
+          kubectl create namespace "$APP_NAMESPACE" \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+
+      - name: Validate runtime secret prerequisites
+        if: env.APPLY_APPLICATIONS == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CLUSTER_SECRET_STORE="$(awk '/^[[:space:]]*secretStoreName:/ { print $2; exit }' "$SECRETS_VALUES_FILE")"
+
+          if [ -z "$CLUSTER_SECRET_STORE" ]; then
+            echo "Unable to resolve secretStoreName from $SECRETS_VALUES_FILE." >&2
+            exit 1
+          fi
+
+          if ! kubectl get crd externalsecrets.external-secrets.io >/dev/null 2>&1; then
+            echo "ExternalSecret CRD is missing. Apply the Terraform addons layer first." >&2
+            exit 1
+          fi
+
+          if ! kubectl get crd clustersecretstores.external-secrets.io >/dev/null 2>&1; then
+            echo "ClusterSecretStore CRD is missing. Apply the Terraform addons layer first." >&2
+            exit 1
+          fi
+
+          if ! kubectl get clustersecretstore "$CLUSTER_SECRET_STORE" >/dev/null 2>&1; then
+            echo "ClusterSecretStore '$CLUSTER_SECRET_STORE' is missing. Apply the Terraform addons layer first." >&2
+            exit 1
+          fi
+
+      - name: Create or update OpenAI secret
+        if: env.APPLY_APPLICATIONS == 'true'
+        shell: bash
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "GitHub secret OPENAI_API_KEY is missing or empty." >&2
+            exit 1
+          fi
+
+          kubectl delete externalsecret petclinic-openai-secret \
+            --namespace "$APP_NAMESPACE" \
+            --ignore-not-found
+
+          kubectl delete secret openai-secret \
+            --namespace "$APP_NAMESPACE" \
+            --ignore-not-found
+
+          kubectl create secret generic openai-secret \
+            --namespace "$APP_NAMESPACE" \
+            --from-literal=SPRING_AI_OPENAI_API_KEY="$OPENAI_API_KEY" \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+
+      - name: Install shared ExternalSecrets chart
+        if: env.APPLY_APPLICATIONS == 'true'
+        run: |
+          helm upgrade --install "$SECRETS_RELEASE_NAME" "$SECRETS_CHART" \
+            --namespace "$APP_NAMESPACE" \
+            --create-namespace \
+            --wait \
+            --timeout 5m \
+            --cleanup-on-fail \
+            -f "$SECRETS_VALUES_FILE" \
+            --set openai.enabled=false
+
+      - name: Wait for database secret
+        if: env.APPLY_APPLICATIONS == 'true'
+        run: |
+          set -euo pipefail
+
+          for _ in $(seq 1 40); do
+            if kubectl get secret mysql-secret --namespace "$APP_NAMESPACE" >/dev/null 2>&1; then
+              echo "mysql-secret exists."
+              exit 0
+            fi
+
+            sleep 5
+          done
+
+          kubectl get externalsecret petclinic-db-secret \
+            --namespace "$APP_NAMESPACE" \
+            -o yaml || true
+
+          echo "mysql-secret was not created by External Secrets within the timeout window." >&2
+          exit 1
+
+      - name: Apply Petclinic ArgoCD applications
+        if: env.APPLY_APPLICATIONS == 'true'
+        run: |
+          set -euo pipefail
+
+          kubectl apply -f k8s/argocd/applications/project.yaml
+          kubectl apply -k "k8s/argocd/applications/${DEPLOY_ENV}"
+
+          for SERVICE in $REFRESH_SERVICES; do
+            kubectl annotate application "${SERVICE}-${DEPLOY_ENV}" \
+              --namespace "$ARGOCD_NAMESPACE" \
+              argocd.argoproj.io/refresh=hard \
+              --overwrite
+          done
+
+      - name: Wait for Petclinic ArgoCD applications
+        if: env.APPLY_APPLICATIONS == 'true' && env.WAIT_APPLICATIONS == 'true'
+        run: |
+          set -euo pipefail
+
+          SERVICES="$REFRESH_SERVICES"
+          EXPECTED_COUNT="$(printf '%s' "$SERVICES" | wc -w | tr -d ' ')"
+
+          for _ in $(seq 1 60); do
+            READY_COUNT=0
+
+            for SERVICE in $SERVICES; do
+              APP="${SERVICE}-${DEPLOY_ENV}"
+              SYNC_STATUS="$(kubectl get application "$APP" \
+                --namespace "$ARGOCD_NAMESPACE" \
+                -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
+              HEALTH_STATUS="$(kubectl get application "$APP" \
+                --namespace "$ARGOCD_NAMESPACE" \
+                -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
+
+              if [ "$SYNC_STATUS" = "Synced" ] && [ "$HEALTH_STATUS" = "Healthy" ]; then
+                READY_COUNT="$((READY_COUNT + 1))"
+              fi
+            done
+
+            kubectl get applications --namespace "$ARGOCD_NAMESPACE" -o wide || true
+
+            if [ "$READY_COUNT" -eq "$EXPECTED_COUNT" ]; then
+              exit 0
+            fi
+
+            sleep 10
+          done
+
+          echo "Petclinic ArgoCD Applications did not become Synced and Healthy in time." >&2
+          exit 1
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          {
+            echo "### ArgoCD deployment"
+            echo "- Environment: \`${DEPLOY_ENV}\`"
+            echo "- Cluster: \`${CLUSTER_NAME:-unknown}\`"
+            echo "- Namespace: \`${ARGOCD_NAMESPACE}\`"
+            echo "- Helm release: \`${ARGOCD_RELEASE_NAME}\`"
+            echo "- Chart version: \`${ARGOCD_CHART_VERSION:-latest}\`"
+            echo "- Applications applied: \`${APPLY_APPLICATIONS}\`"
+            echo "- Applications refreshed: \`${REFRESH_SERVICES:-all}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          kubectl get pods --namespace "$ARGOCD_NAMESPACE" || true
+          kubectl get applications --namespace "$ARGOCD_NAMESPACE" -o wide || true
