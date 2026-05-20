@@ -10,7 +10,7 @@ metadata:
 spec:
   project: petclinic
   source:
-    repoURL: https://github.com/Goodnessoj/petclinic-Infra.git
+    repoURL: https://github.com/Goodnessoj/platform-petclinic.git
     targetRevision: main
     path: helm/petclinic-service
     helm:
