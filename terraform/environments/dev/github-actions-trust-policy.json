@@ -13,8 +13,8 @@
         },
         "StringLike": {
           "token.actions.githubusercontent.com:sub": [
-            "repo:Goodnessoj/petclinic-Infra:ref:refs/heads/main",
-            "repo:Goodnessoj/petclinic-Infra:environment:dev"
+            "repo:Goodnessoj/platform-petclinic:ref:refs/heads/main",
+            "repo:Goodnessoj/platform-petclinic:environment:dev"
           ]
         }
       }

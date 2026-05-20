@@ -33,7 +33,7 @@ variable "github_repositories" {
   default = [
     {
       owner        = "Goodnessoj"
-      name         = "petclinic-Infra"
+      name         = "platform-petclinic"
       branches     = ["main"]
       environments = ["dev", "prod"]
     },
