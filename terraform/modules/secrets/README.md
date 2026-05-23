@@ -37,6 +37,11 @@ accidental secret rotation through Terraform. The GitHub Actions workflows can
 also create the Kubernetes `openai-secret` directly from the `OPENAI_API_KEY`
 GitHub secret.
 
+When GitHub Actions owns the OpenAI runtime secret, set
+`create_openai_secret = false`. Terraform will skip the AWS Secrets Manager
+OpenAI secret, and the workflow will create the Kubernetes `openai-secret`
+during GitOps bootstrap instead.
+
 ## Grafana Secret
 
 The Grafana secret stores:

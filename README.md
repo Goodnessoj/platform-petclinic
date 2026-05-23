@@ -38,8 +38,9 @@ The active deployment path is:
 - **Images:** one ECR repository per service.
 - **Database:** RDS MySQL with generated credentials stored in Secrets Manager.
 - **Secrets:** External Secrets Operator reads AWS Secrets Manager into
-  Kubernetes secrets such as `mysql-secret`; OpenAI runtime secret is also
-  handled by the workflows.
+  Kubernetes secrets such as `mysql-secret`. The OpenAI runtime secret is
+  created directly by GitHub Actions from the `OPENAI_API_KEY` GitHub secret
+  when GitOps bootstrap runs.
 - **Ingress and DNS:** AWS Load Balancer Controller, optional ExternalDNS, ACM,
   Route 53 records, and ALB-backed ingresses for the app, Argo CD, Grafana,
   Prometheus, and selected dev service dashboards.
@@ -66,6 +67,11 @@ GitHub Actions also expects:
 - Optional `ARGOCD_REPO_TOKEN` or `GITOPS_PAT` when private repository access or
   tag update pushes need a token beyond the default `GITHUB_TOKEN`.
 
+The AWS role used by GitHub Actions is created by the bootstrap Terraform root.
+Keep that bootstrap root applied before running `platform.yaml`; the role needs
+platform permissions such as `iam:GetRole` and `iam:CreateServiceLinkedRole` so
+EKS can create managed node groups.
+
 ## Bootstrap Order
 
 Run the durable bootstrap root first. It creates the remote state bucket and the
@@ -84,6 +90,11 @@ terraform -chdir=terraform/environments/dev init
 terraform -chdir=terraform/environments/dev plan -var-file=terraform.tfvars
 terraform -chdir=terraform/environments/dev apply -var-file=terraform.tfvars
 ```
+
+Local Terraform apply creates the AWS and Kubernetes platform, but it cannot
+read GitHub Secrets. For a full dev deploy that creates `openai-secret`, installs
+the shared application secrets chart, and applies Argo CD Applications, run the
+`Platform` workflow with `action=apply` and `bootstrap_gitops=true`.
 
 After the dev platform is available, configure local Kubernetes access:
 
@@ -117,7 +128,7 @@ commits the change to `main`, and triggers Argo CD refreshes.
 The workflow definitions live under `.github/workflows`:
 
 - `platform.yaml`
-- `argo-argocd.yml`
+- `deploy-argocd.yml`
 - `update-image-tags.yaml`
 - `deploy-services.yaml`
 
@@ -177,6 +188,9 @@ kubectl get --raw /api/v1/namespaces/monitoring/services/http:alertmanager:9093/
 
 - Do not destroy `terraform/environments/bootstrap` during normal environment
   rebuilds. It owns the Terraform state bucket and GitHub Actions OIDC role.
+- For dev destroy/reapply, prefer the `Platform` workflow. It performs
+  Kubernetes cleanup before Terraform destroys EKS and VPC resources, then the
+  apply path can bootstrap GitOps with GitHub-only secrets.
 - If Terraform reports `Failed to persist state to backend` and writes
   `errored.tfstate`, do not run apply again first. Restore the backend bucket,
   then run `terraform state push errored.tfstate` from the affected root.

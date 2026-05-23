@@ -55,6 +55,12 @@ terraform -chdir=terraform/environments/dev apply -var-file=terraform.tfvars
 `terraform.tfvars` contains environment-specific variable values used by local
 runs and the platform workflow when the file exists.
 
+Local applies are useful for infrastructure repair and validation, but they do
+not have access to GitHub Secrets. If `create_openai_secret = false`, run the
+GitHub `Platform` workflow with `bootstrap_gitops=true` after apply so the
+workflow can create `openai-secret`, install the shared secrets chart, and apply
+Argo CD Applications.
+
 ## Provider Notes
 
 The dev and prod roots configure:
@@ -75,6 +81,12 @@ tokens during long apply and destroy runs.
 2. Apply `environments/dev` or `environments/prod`.
 3. Use Terraform outputs to update kubeconfig or let GitHub Actions do it.
 4. Bootstrap or refresh Argo CD applications.
+
+When GitHub Actions applies the platform, the bootstrap-created role must have
+the current platform policy. Managed EKS node group creation requires
+`iam:GetRole` as well as `iam:CreateServiceLinkedRole` because EKS validates the
+`AWSServiceRoleForAmazonEKSNodegroup` service-linked role before creating the
+node group. Re-apply `environments/bootstrap` after changing that policy.
 
 For destroy runs, prefer the platform workflow. It previews destroy without a
 saved plan, removes GitOps Applications, ingresses, stale ExternalSecret

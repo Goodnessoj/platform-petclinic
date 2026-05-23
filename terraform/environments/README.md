@@ -42,6 +42,10 @@ The deployable environment roots compose these modules:
 
 The GitHub Actions platform workflow grants its Terraform role cluster-admin
 access with EKS access entries before refreshing Kubernetes and Helm resources.
+That role is created by the durable `bootstrap` root. Keep bootstrap applied
+when platform permissions change; the workflow role needs `iam:GetRole` and
+`iam:CreateServiceLinkedRole` for EKS managed node group service-linked-role
+checks.
 
 ## Variables
 
@@ -61,6 +65,11 @@ Use `terraform.tfvars` for local overrides. Important values include:
 `terraform.tfvars` files are no longer ignored by Git. Commit only sanitized
 environment values, and keep credentials in GitHub secrets or another controlled
 secret source.
+
+When `OPENAI_API_KEY` is stored only in GitHub Secrets, keep
+`create_openai_secret = false` for local Terraform. The GitHub `Platform`
+workflow creates the Kubernetes `openai-secret` during GitOps bootstrap; local
+Terraform cannot read repository or environment secrets from GitHub.
 
 ## State Recovery
 

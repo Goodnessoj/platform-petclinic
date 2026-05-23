@@ -13,6 +13,21 @@ to AWS without long-lived access keys.
 - Optional platform Terraform permissions for managing AWS platform services.
 - Optional additional managed policy attachments.
 
+## Platform Terraform Permissions
+
+When `enable_platform_terraform_permissions = true`, the role can manage the
+AWS services used by the platform roots, including EKS, EC2, ECR, RDS, ACM,
+Route 53, Secrets Manager, CloudWatch, and scoped IAM resources.
+
+The policy also grants service-linked-role access on `*`:
+
+- `iam:GetRole`
+- `iam:CreateServiceLinkedRole`
+
+EKS managed node group creation calls `iam:GetRole` to validate whether
+`AWSServiceRoleForAmazonEKSNodegroup` already exists. Without that permission,
+the GitHub `Platform` workflow can fail before worker nodes are created.
+
 ## Trust Policy
 
 Allowed GitHub subjects are generated from `github_repositories`.

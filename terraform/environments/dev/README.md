@@ -60,6 +60,11 @@ If GitHub Actions owns the OpenAI runtime secret, keep:
 create_openai_secret = false
 ```
 
+In that mode, local Terraform creates the platform but does not create the
+Kubernetes `openai-secret`. Use the GitHub `Platform` workflow with
+`bootstrap_gitops=true` for the full application bootstrap, because the workflow
+can read the `OPENAI_API_KEY` GitHub secret.
+
 ## Usage
 
 ```bash
@@ -75,6 +80,16 @@ Update kubeconfig after apply:
 ```bash
 aws eks update-kubeconfig --region us-east-2 --name petclinic-dev-eks
 kubectl get nodes
+```
+
+For a full workflow-driven apply after a destroy or partial local repair, run
+the `Platform` workflow with:
+
+```text
+environment=dev
+action=apply
+bootstrap_gitops=true
+force_destroy_cleanup=true
 ```
 
 ## Important Outputs
@@ -103,6 +118,27 @@ kubectl get pods -n monitoring
 kubectl get clustersecretstore aws-secrets-manager
 ```
 
+If you applied locally and only need database runtime secrets, install the
+shared secrets chart with OpenAI disabled:
+
+```bash
+helm upgrade --install petclinic-secrets helm/petclinic-secrets \
+  --namespace petclinic-dev \
+  --create-namespace \
+  --wait \
+  --timeout 5m \
+  --cleanup-on-fail \
+  -f helm-values/secrets-dev.yaml \
+  --set openai.enabled=false
+```
+
+Verify:
+
+```bash
+kubectl get externalsecret -n petclinic-dev
+kubectl get secret mysql-secret -n petclinic-dev
+```
+
 If `enable_dns_ingress` is true, dev endpoints are expected at:
 
 ```text
@@ -124,6 +160,11 @@ stale ExternalSecret finalizers, and TargetGroupBindings, destroys
 Terraform-managed platform ingress/DNS resources first, optionally force-deletes
 leftover cluster ALBs and VPC dependencies, waits for ACM certificates to
 detach, then runs a fresh Terraform destroy.
+
+If local destroy stalls on subnet or VPC deletion after EKS is gone, check for
+leftover EKS-created network interfaces or security groups before retrying. The
+platform workflow's force cleanup path handles the common ALB and VPC dependency
+cases automatically.
 
 If a local apply or destroy reports `Failed to persist state to backend`, do not
 run apply again first. Restore the backend bucket if needed, then run:

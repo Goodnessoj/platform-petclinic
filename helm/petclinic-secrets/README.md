@@ -54,6 +54,11 @@ from the `OPENAI_API_KEY` GitHub secret and install this chart with
 `--set openai.enabled=false`. That avoids storing the OpenAI key in Terraform
 state-managed secret versions.
 
+Local installs should usually follow the same pattern unless you deliberately
+store the OpenAI key in AWS Secrets Manager. A local Terraform apply cannot read
+GitHub Secrets, so it can create the database secret path but not the
+GitHub-owned OpenAI runtime secret.
+
 ## Install Example
 
 ```bash

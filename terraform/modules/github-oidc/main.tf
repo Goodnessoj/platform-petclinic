@@ -337,11 +337,12 @@ data "aws_iam_policy_document" "platform_terraform" {
   }
 
   statement {
-    sid    = "CreateServiceLinkedRoles"
+    sid    = "ManageServiceLinkedRoles"
     effect = "Allow"
 
     actions = [
-      "iam:CreateServiceLinkedRole"
+      "iam:CreateServiceLinkedRole",
+      "iam:GetRole"
     ]
 
     resources = ["*"]

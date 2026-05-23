@@ -15,7 +15,7 @@ the platform.
   Terraform-managed platform ingress/DNS resources first, optionally force-delete
   leftover cluster ALBs and VPC dependencies, then wait for all ACM certificates
   to detach before running a fresh Terraform destroy.
-- `argo-argocd.yml`: installs Argo CD, applies Argo CD RBAC, applies the
+- `deploy-argocd.yml`: installs Argo CD, applies Argo CD RBAC, applies the
   Petclinic AppProject and Applications, then optionally waits for health.
 - `update-image-tags.yaml`: listens for `repository_dispatch` events from the
   application build pipeline and writes new image tags into `helm-values`.
@@ -47,3 +47,15 @@ If Terraform completes real work but cannot write remote state, it writes
 `errored.tfstate` in the affected environment directory. Do not rerun apply or
 destroy until the backend is restored and the recovered state has been pushed
 with `terraform state push errored.tfstate`.
+
+## Platform Apply Requirements
+
+The `platform.yaml` workflow assumes the bootstrap-created GitHub Actions role.
+Keep `terraform/environments/bootstrap` applied before running platform apply or
+destroy. The role must be able to read and create AWS service-linked roles; EKS
+managed node group creation checks `AWSServiceRoleForAmazonEKSNodegroup` with
+`iam:GetRole`.
+
+`platform.yaml` can bootstrap GitOps only when `OPENAI_API_KEY` is configured as
+a GitHub secret. Local Terraform does not receive that secret, so a local apply
+can leave Argo CD installed but with no Petclinic Applications applied.

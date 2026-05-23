@@ -49,6 +49,13 @@ When platform ingress is enabled:
 Optional chart version inputs can pin External Secrets, AWS Load Balancer
 Controller, ExternalDNS, kube-prometheus-stack, and Argo CD.
 
+## Helm Apply Behavior
+
+External Secrets, Argo CD, and kube-prometheus-stack are CRD-heavy charts. Their
+Helm releases disable OpenAPI validation so a slow EKS `/openapi/v2` response
+does not fail an otherwise valid apply. Helm still renders the charts, submits
+the resources to Kubernetes, and waits for release readiness.
+
 ## Namespaces
 
 The module uses these namespaces:
@@ -68,6 +75,11 @@ using IRSA.
 
 The shared `helm/petclinic-secrets` chart creates application-level
 `ExternalSecret` resources that point to this store.
+
+When the OpenAI API key lives only in GitHub Secrets, the platform workflow
+creates the Kubernetes `openai-secret` directly and installs the shared secrets
+chart with `openai.enabled=false`. That keeps the OpenAI key out of Terraform
+state-managed secret versions.
 
 ## Monitoring
 

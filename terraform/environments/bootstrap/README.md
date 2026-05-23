@@ -17,7 +17,8 @@ platform environment can be managed safely.
   - Push and pull prefixed ECR images.
   - Read and write allowed Terraform state keys.
   - Manage the dev and prod platform Terraform stacks when enabled.
-  - Update the OpenAI runtime secret in AWS Secrets Manager.
+  - Manage Secrets Manager entries used by the platform.
+  - Read and create AWS service-linked roles needed by managed EKS node groups.
 
 ## Safety Policy
 
@@ -75,6 +76,13 @@ terraform -chdir=terraform/environments/bootstrap apply -var-file=terraform.tfva
 
 After bootstrap is applied, copy `github_actions_role_arn` into the GitHub
 environment or repository secret/variable used by the workflows.
+
+Re-apply this root whenever the GitHub Actions role policy changes. Platform
+workflow failures that mention missing IAM permissions are usually fixed here,
+not in the disposable dev or prod roots. For example, EKS managed node group
+creation needs `iam:GetRole` to check
+`AWSServiceRoleForAmazonEKSNodegroup` and `iam:CreateServiceLinkedRole` when the
+service-linked role does not exist yet.
 
 ## Typical Rebuild Flow
 

@@ -58,6 +58,12 @@ Before services become healthy:
 - `ClusterSecretStore/aws-secrets-manager` must exist.
 - The AWS Load Balancer Controller must exist when ingress is enabled.
 
+The GitHub `Platform` workflow with `bootstrap_gitops=true` creates
+`openai-secret` from the `OPENAI_API_KEY` GitHub secret, installs the shared
+database secrets chart, and applies these Argo CD Applications. If you apply
+this folder manually after a local Terraform apply, create `openai-secret` first
+or leave `genai-service` unsynced until the secret exists.
+
 ## Manual Apply
 
 Apply only the dev GitOps layer:
