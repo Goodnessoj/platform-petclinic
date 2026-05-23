@@ -126,8 +126,8 @@ Prod applications are configured for manual sync.
 The service image tags live in `helm-values/<service>.yaml`. The
 `Update Image Tags` workflow receives build notifications, updates those values,
 commits the change to `main`, and dispatches the Argo CD deploy workflow. The
-Argo CD deploy workflow is triggered only by that dispatch, not directly by
-pushes to `main`.
+Argo CD deploy workflow can also be run manually, but it is not triggered
+directly by pushes to `main`.
 
 The workflow definitions live under `.github/workflows`:
 

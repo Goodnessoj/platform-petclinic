@@ -108,7 +108,7 @@ apply Petclinic Argo CD Applications.
 Use the `Deploy ArgoCD Applications` workflow:
 
 - File: `.github/workflows/deploy-argocd.yml`
-- Trigger: image tag update dispatch
+- Trigger: image tag update dispatch or manual dispatch
 
 This verifies the Terraform-managed Argo CD install, applies the Petclinic
 AppProject and Applications, and waits for selected apps to become `Synced` and

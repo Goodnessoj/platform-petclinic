@@ -8,7 +8,7 @@ GitOps deployment loop.
 | Workflow | File | Purpose |
 | --- | --- | --- |
 | Platform | [`workflows/platform.yaml`](workflows/platform.yaml) | Plans, applies, or destroys the selected Terraform platform. On apply it can also bootstrap runtime secrets, but it does not apply Petclinic Argo CD Applications. On destroy it pre-cleans GitOps ingresses/finalizers before Terraform removes AWS resources. |
-| Deploy ArgoCD Applications | [`workflows/deploy-argocd.yml`](workflows/deploy-argocd.yml) | Verifies the Terraform-managed Argo CD install, applies Argo CD applications, and waits for selected apps. Its only trigger is the image tag update dispatch; it does not run from pushes to `main`. |
+| Deploy ArgoCD Applications | [`workflows/deploy-argocd.yml`](workflows/deploy-argocd.yml) | Verifies the Terraform-managed Argo CD install, applies Argo CD applications, and waits for selected apps. It runs from image tag update dispatches or manual dispatch, not from pushes to `main`. |
 | Update Image Tags | [`workflows/update-image-tags.yaml`](workflows/update-image-tags.yaml) | Receives app image build dispatches, updates service image tags in `helm-values`, commits the change, and triggers Argo CD deployment. |
 | Deploy Changed Petclinic Services | [`workflows/deploy-services.yaml`](workflows/deploy-services.yaml) | Imperatively deploys selected services with Helm in dependency order. This is useful when bypassing or recovering GitOps. |
 
