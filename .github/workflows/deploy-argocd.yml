@@ -1,51 +1,16 @@
 name: Deploy ArgoCD
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "k8s/argocd/**"
-      - ".github/workflows/argo-argocd.yml"
   repository_dispatch:
     types:
       - deploy-argocd
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: Environment to deploy ArgoCD applications for.
-        required: true
-        type: choice
-        default: dev
-        options:
-          - dev
-          - prod
-      cluster_name:
-        description: Optional EKS cluster name. Defaults to petclinic-<environment>-eks.
-        required: false
-        type: string
-      chart_version:
-        description: Argo CD Helm chart version.
-        required: false
-        type: string
-        default: 9.5.14
-      apply_applications:
-        description: Apply Petclinic ArgoCD AppProject and Applications.
-        required: true
-        type: boolean
-        default: true
-      wait_applications:
-        description: Wait for Petclinic ArgoCD Applications to become Synced and Healthy.
-        required: true
-        type: boolean
-        default: true
 
 permissions:
   contents: read
   id-token: write
 
 concurrency:
-  group: deploy-argocd-${{ github.event.client_payload.environment || github.event.inputs.environment || 'dev' }}
+  group: deploy-argocd-${{ github.event.client_payload.environment || 'dev' }}
   cancel-in-progress: false
 
 env:
@@ -53,11 +18,11 @@ env:
   AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN || secrets.AWS_ROLE_TO_ASSUME || vars.AWS_ROLE_ARN || '' }}
   ARGOCD_NAMESPACE: argocd
   ARGOCD_RELEASE_NAME: argocd
-  ARGOCD_CHART_VERSION: ${{ github.event.client_payload.chart_version || github.event.inputs.chart_version || vars.ARGOCD_CHART_VERSION || '9.5.14' }}
+  ARGOCD_CHART_VERSION: ${{ github.event.client_payload.chart_version || vars.ARGOCD_CHART_VERSION || '9.5.14' }}
   SECRETS_CHART: helm/petclinic-secrets
   SECRETS_RELEASE_NAME: petclinic-secrets
-  DEPLOY_ENV: ${{ github.event.client_payload.environment || github.event.inputs.environment || 'dev' }}
-  INPUT_CLUSTER_NAME: ${{ github.event.client_payload.cluster_name || github.event.inputs.cluster_name || '' }}
+  DEPLOY_ENV: ${{ github.event.client_payload.environment || 'dev' }}
+  INPUT_CLUSTER_NAME: ${{ github.event.client_payload.cluster_name || '' }}
   APPLY_APPLICATIONS: ""
   WAIT_APPLICATIONS: ""
 
@@ -65,7 +30,7 @@ jobs:
   deploy-argocd:
     name: Deploy ArgoCD
     runs-on: ubuntu-latest
-    environment: ${{ github.event.client_payload.environment || github.event.inputs.environment || 'dev' }}
+    environment: ${{ github.event.client_payload.environment || 'dev' }}
 
     steps:
       - name: Checkout repository
@@ -94,8 +59,6 @@ jobs:
           DISPATCH_WAIT_APPLICATIONS: ${{ github.event.client_payload.wait_applications }}
           DISPATCH_CHANGED_SERVICES: ${{ github.event.client_payload.changed_services || '' }}
           DISPATCH_SERVICES: ${{ github.event.client_payload.services || '' }}
-          INPUT_APPLY_APPLICATIONS: ${{ github.event.inputs.apply_applications }}
-          INPUT_WAIT_APPLICATIONS: ${{ github.event.inputs.wait_applications }}
         run: |
           set -euo pipefail
 
@@ -125,18 +88,10 @@ jobs:
           APPLY_APPLICATIONS="$DISPATCH_APPLY_APPLICATIONS"
 
           if [ -z "$APPLY_APPLICATIONS" ]; then
-            APPLY_APPLICATIONS="$INPUT_APPLY_APPLICATIONS"
-          fi
-
-          if [ -z "$APPLY_APPLICATIONS" ]; then
             APPLY_APPLICATIONS="true"
           fi
 
           WAIT_APPLICATIONS="$DISPATCH_WAIT_APPLICATIONS"
-
-          if [ -z "$WAIT_APPLICATIONS" ]; then
-            WAIT_APPLICATIONS="$INPUT_WAIT_APPLICATIONS"
-          fi
 
           if [ -z "$WAIT_APPLICATIONS" ]; then
             WAIT_APPLICATIONS="true"

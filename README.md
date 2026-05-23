@@ -94,7 +94,9 @@ terraform -chdir=terraform/environments/dev apply -var-file=terraform.tfvars
 Local Terraform apply creates the AWS and Kubernetes platform, but it cannot
 read GitHub Secrets. For a full dev deploy that creates `openai-secret`, installs
 the shared application secrets chart, and applies Argo CD Applications, run the
-`Platform` workflow with `action=apply` and `bootstrap_gitops=true`.
+`Platform` workflow with `action=apply` and `bootstrap_gitops=true`. The
+platform workflow does not wait for Petclinic workload health; use
+`deploy-argocd.yml` for the Argo CD health gate.
 
 After the dev platform is available, configure local Kubernetes access:
 
@@ -123,7 +125,9 @@ Prod applications are configured for manual sync.
 
 The service image tags live in `helm-values/<service>.yaml`. The
 `Update Image Tags` workflow receives build notifications, updates those values,
-commits the change to `main`, and triggers Argo CD refreshes.
+commits the change to `main`, and dispatches the Argo CD deploy workflow. The
+Argo CD deploy workflow is triggered only by that dispatch, not directly by
+pushes to `main`.
 
 The workflow definitions live under `.github/workflows`:
 

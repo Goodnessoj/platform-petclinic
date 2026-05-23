@@ -43,7 +43,7 @@ on:
           - apply
           - destroy
       bootstrap_gitops:
-        description: Apply ArgoCD apps and runtime secrets after Terraform apply.
+        description: Create runtime secrets and apply Argo CD app manifests after Terraform apply.
         required: true
         type: boolean
         default: true
@@ -963,48 +963,10 @@ jobs:
               --overwrite
           done
 
-      - name: Wait for ArgoCD applications
+      - name: Show ArgoCD applications
         if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
-        shell: bash
         run: |
-          set -euo pipefail
-
-          APPS=(
-            "config-server-${DEPLOY_ENV}"
-            "discovery-server-${DEPLOY_ENV}"
-            "customers-service-${DEPLOY_ENV}"
-            "vets-service-${DEPLOY_ENV}"
-            "visits-service-${DEPLOY_ENV}"
-            "genai-service-${DEPLOY_ENV}"
-            "api-gateway-${DEPLOY_ENV}"
-            "admin-server-${DEPLOY_ENV}"
-          )
-
-          for _ in $(seq 1 60); do
-            READY_COUNT=0
-
-            for APP in "${APPS[@]}"; do
-              STATUS="$(kubectl get application "$APP" \
-                --namespace "$ARGOCD_NAMESPACE" \
-                -o jsonpath='{.status.sync.status} {.status.health.status}' 2>/dev/null || true)"
-
-              if [ "$STATUS" = "Synced Healthy" ]; then
-                READY_COUNT=$((READY_COUNT + 1))
-              fi
-            done
-
-            if [ "$READY_COUNT" -eq "${#APPS[@]}" ]; then
-              kubectl get applications --namespace "$ARGOCD_NAMESPACE" -o wide
-              exit 0
-            fi
-
-            kubectl get applications --namespace "$ARGOCD_NAMESPACE" -o wide
-            sleep 10
-          done
-
-          echo "ArgoCD $DEPLOY_ENV Applications did not become Synced and Healthy in time." >&2
-          kubectl get applications --namespace "$ARGOCD_NAMESPACE" -o wide
-          exit 1
+          kubectl get applications --namespace "$ARGOCD_NAMESPACE" -o wide || true
 
       - name: Workflow summary
         if: always()
