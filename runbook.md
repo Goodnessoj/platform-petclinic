@@ -103,16 +103,14 @@ The workflow also ensures the GitHub Actions IAM role has EKS access, creates
 or updates runtime secrets, and installs the shared secrets chart. It does not
 apply Petclinic Argo CD Applications.
 
-### Deploy Argo CD And GitOps Apps
+### Deploy Argo CD Applications
 
-Use the `Deploy ArgoCD` workflow:
+Use the `Deploy ArgoCD Applications` workflow:
 
-- File: `.github/workflows/argo-argocd.yml`
-- Input `environment`: `dev` or `prod`
-- Input `apply_applications`: `true`
-- Input `wait_applications`: `true`
+- File: `.github/workflows/deploy-argocd.yml`
+- Trigger: image tag update dispatch
 
-This installs or upgrades Argo CD, configures RBAC, applies the Petclinic
+This verifies the Terraform-managed Argo CD install, applies the Petclinic
 AppProject and Applications, and waits for selected apps to become `Synced` and
 `Healthy`.
 
@@ -316,8 +314,8 @@ kubectl describe pod -n petclinic-dev -l app.kubernetes.io/instance=genai-servic
 Fixes:
 
 - Confirm GitHub secret `OPENAI_API_KEY` is set.
-- Rerun `Platform` apply with `bootstrap_runtime_secrets=true`, `Deploy ArgoCD`,
-  or `Deploy Changed Petclinic Services`.
+- Rerun `Platform` apply with `bootstrap_runtime_secrets=true`, `Deploy ArgoCD
+  Applications`, or `Deploy Changed Petclinic Services`.
 
 ### Argo CD Application Degraded Or Out Of Sync
 
@@ -455,7 +453,7 @@ blocking Terraform.
 
 - `.github/README.md`
 - `.github/workflows/platform.yaml`
-- `.github/workflows/argo-argocd.yml`
+- `.github/workflows/deploy-argocd.yml`
 - `.github/workflows/deploy-services.yaml`
 - `.github/workflows/update-image-tags.yaml`
 - `terraform/environments/bootstrap/README.md`

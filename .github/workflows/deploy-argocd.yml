@@ -1,4 +1,4 @@
-name: Deploy ArgoCD
+name: Deploy ArgoCD Applications
 
 on:
   repository_dispatch:
@@ -17,8 +17,6 @@ env:
   AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
   AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN || secrets.AWS_ROLE_TO_ASSUME || vars.AWS_ROLE_ARN || '' }}
   ARGOCD_NAMESPACE: argocd
-  ARGOCD_RELEASE_NAME: argocd
-  ARGOCD_CHART_VERSION: ${{ github.event.client_payload.chart_version || vars.ARGOCD_CHART_VERSION || '9.5.14' }}
   SECRETS_CHART: helm/petclinic-secrets
   SECRETS_RELEASE_NAME: petclinic-secrets
   DEPLOY_ENV: ${{ github.event.client_payload.environment || 'dev' }}
@@ -28,7 +26,7 @@ env:
 
 jobs:
   deploy-argocd:
-    name: Deploy ArgoCD
+    name: Deploy ArgoCD Applications
     runs-on: ubuntu-latest
     environment: ${{ github.event.client_payload.environment || 'dev' }}
 
@@ -252,85 +250,31 @@ jobs:
           kubectl auth can-i get namespaces
           kubectl get nodes
 
-      - name: Deploy ArgoCD Helm release
+      - name: Verify ArgoCD is ready
         run: |
           set -euo pipefail
 
-          helm repo add argo https://argoproj.github.io/argo-helm
-          helm repo update
-
-          HELM_ARGS=(
-            upgrade --install "$ARGOCD_RELEASE_NAME" argo/argo-cd
-            --namespace "$ARGOCD_NAMESPACE"
-            --create-namespace
-            --wait
-            --timeout 30m
-            --set configs.params.server\\.insecure=true
-            --set redis.serviceAccount.create=true
-            --set redis.serviceAccount.name=argocd-redis
-          )
-
-          if [ -n "${ARGOCD_CHART_VERSION:-}" ]; then
-            HELM_ARGS+=(--version "$ARGOCD_CHART_VERSION")
+          if ! kubectl get namespace "$ARGOCD_NAMESPACE" >/dev/null 2>&1; then
+            echo "Argo CD namespace '$ARGOCD_NAMESPACE' does not exist. Run the Platform workflow first." >&2
+            exit 1
           fi
 
-          helm "${HELM_ARGS[@]}"
-
-      - name: Configure ArgoCD RBAC
-        run: |
-          set -euo pipefail
-
-          cat > /tmp/argocd-policy.csv <<'POLICY'
-          p, role:developer, applications, get, petclinic/*, allow
-          p, role:developer, applications, sync, petclinic/*-dev, allow
-          p, role:developer, applications, action/*, petclinic/*-dev, allow
-          p, role:developer, logs, get, petclinic/*, allow
-          p, role:developer, projects, get, petclinic, allow
-          p, role:developer, repositories, get, *, allow
-
-          g, argocd-admins, role:admin
-          g, argocd-developers, role:developer
-          POLICY
-
-          kubectl create configmap argocd-rbac-cm \
-            --namespace "$ARGOCD_NAMESPACE" \
-            --from-literal=policy.default=role:readonly \
-            --from-literal=scopes='[groups]' \
-            --from-file=policy.csv=/tmp/argocd-policy.csv \
-            --dry-run=client \
-            -o yaml | kubectl apply -f -
-
-      - name: Wait for ArgoCD workloads
-        run: |
-          set -euo pipefail
+          if ! kubectl get crd applications.argoproj.io appprojects.argoproj.io >/dev/null 2>&1; then
+            echo "Argo CD CRDs are missing. Run the Platform workflow first." >&2
+            exit 1
+          fi
 
           kubectl rollout status deployment/argocd-server \
             --namespace "$ARGOCD_NAMESPACE" \
-            --timeout=300s
+            --timeout=180s
 
           kubectl rollout status deployment/argocd-repo-server \
             --namespace "$ARGOCD_NAMESPACE" \
-            --timeout=300s
-
-          kubectl rollout status deployment/argocd-applicationset-controller \
-            --namespace "$ARGOCD_NAMESPACE" \
-            --timeout=300s
-
-          kubectl rollout status deployment/argocd-dex-server \
-            --namespace "$ARGOCD_NAMESPACE" \
-            --timeout=300s
-
-          kubectl rollout status deployment/argocd-notifications-controller \
-            --namespace "$ARGOCD_NAMESPACE" \
-            --timeout=300s
-
-          kubectl rollout status deployment/argocd-redis \
-            --namespace "$ARGOCD_NAMESPACE" \
-            --timeout=300s
+            --timeout=180s
 
           kubectl rollout status statefulset/argocd-application-controller \
             --namespace "$ARGOCD_NAMESPACE" \
-            --timeout=300s
+            --timeout=180s
 
       - name: Create app namespace
         if: env.APPLY_APPLICATIONS == 'true'
@@ -487,8 +431,6 @@ jobs:
             echo "- Environment: \`${DEPLOY_ENV}\`"
             echo "- Cluster: \`${CLUSTER_NAME:-unknown}\`"
             echo "- Namespace: \`${ARGOCD_NAMESPACE}\`"
-            echo "- Helm release: \`${ARGOCD_RELEASE_NAME}\`"
-            echo "- Chart version: \`${ARGOCD_CHART_VERSION:-latest}\`"
             echo "- Applications applied: \`${APPLY_APPLICATIONS}\`"
             echo "- Applications refreshed: \`${REFRESH_SERVICES:-all}\`"
           } >> "$GITHUB_STEP_SUMMARY"
