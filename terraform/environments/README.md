@@ -68,8 +68,8 @@ secret source.
 
 When `OPENAI_API_KEY` is stored only in GitHub Secrets, keep
 `create_openai_secret = false` for local Terraform. The GitHub `Platform`
-workflow creates the Kubernetes `openai-secret` during runtime secret bootstrap;
-local Terraform cannot read repository or environment secrets from GitHub.
+workflow creates the Kubernetes `openai-secret` during GitOps bootstrap; local
+Terraform cannot read repository or environment secrets from GitHub.
 
 ## State Recovery
 

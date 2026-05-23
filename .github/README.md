@@ -7,7 +7,7 @@ GitOps deployment loop.
 
 | Workflow | File | Purpose |
 | --- | --- | --- |
-| Platform | [`workflows/platform.yaml`](workflows/platform.yaml) | Plans, applies, or destroys the selected Terraform platform. On apply it can also bootstrap runtime secrets, but it does not apply Petclinic Argo CD Applications. On destroy it pre-cleans GitOps ingresses/finalizers before Terraform removes AWS resources. |
+| Platform | [`workflows/platform.yaml`](workflows/platform.yaml) | Plans, applies, or destroys the selected Terraform platform. On apply it can also bootstrap runtime secrets and apply/refresh Petclinic Argo CD Applications without waiting for workload health. On destroy it pre-cleans GitOps ingresses/finalizers before Terraform removes AWS resources. |
 | Deploy ArgoCD Applications | [`workflows/deploy-argocd.yml`](workflows/deploy-argocd.yml) | Verifies the Terraform-managed Argo CD install, applies Argo CD applications, and waits for selected apps. It runs from image tag update dispatches or manual dispatch, not from pushes to `main`. |
 | Update Image Tags | [`workflows/update-image-tags.yaml`](workflows/update-image-tags.yaml) | Receives app image build dispatches, updates service image tags in `helm-values`, commits the change, and triggers Argo CD deployment. |
 | Deploy Changed Petclinic Services | [`workflows/deploy-services.yaml`](workflows/deploy-services.yaml) | Imperatively deploys selected services with Helm in dependency order. This is useful when bypassing or recovering GitOps. |
@@ -57,7 +57,8 @@ TargetGroupBinding finalizers, then wait for the ACM certificate to detach
 before Terraform deletes the certificate and cluster.
 
 For a complete rebuild, run `platform.yaml` with `action=destroy`, then rerun it
-with `action=apply` and `bootstrap_runtime_secrets=true`. Local Terraform can
-recreate the platform, but only GitHub Actions can consume the `OPENAI_API_KEY`
-GitHub secret and create the runtime `openai-secret`. Applying Petclinic Argo
-CD Applications and waiting for their health stays in `deploy-argocd.yml`.
+with `action=apply` and `bootstrap_gitops=true`. Local Terraform can recreate
+the platform, but only GitHub Actions can consume the `OPENAI_API_KEY` GitHub
+secret and create the runtime `openai-secret`. Platform apply can apply and
+refresh the Argo CD Applications, while waiting for workload health stays in
+`deploy-argocd.yml`.

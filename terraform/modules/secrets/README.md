@@ -40,7 +40,7 @@ GitHub secret.
 When GitHub Actions owns the OpenAI runtime secret, set
 `create_openai_secret = false`. Terraform will skip the AWS Secrets Manager
 OpenAI secret, and the workflow will create the Kubernetes `openai-secret`
-during runtime secret bootstrap instead.
+during GitOps bootstrap instead.
 
 ## Grafana Secret
 

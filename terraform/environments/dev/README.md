@@ -62,9 +62,9 @@ create_openai_secret = false
 
 In that mode, local Terraform creates the platform but does not create the
 Kubernetes `openai-secret`. Use the GitHub `Platform` workflow with
-`bootstrap_runtime_secrets=true` when you want the workflow to create runtime
-secrets from the `OPENAI_API_KEY` GitHub secret. Petclinic Argo CD Applications
-are applied by `deploy-argocd.yml` after image tag updates.
+`bootstrap_gitops=true` when you want the workflow to create runtime secrets
+from the `OPENAI_API_KEY` GitHub secret and apply the Petclinic Argo CD
+Applications without waiting for workload health.
 
 ## Usage
 
@@ -89,12 +89,12 @@ the `Platform` workflow with:
 ```text
 environment=dev
 action=apply
-bootstrap_runtime_secrets=true
+bootstrap_gitops=true
 force_destroy_cleanup=true
 ```
 
-This recreates the platform and runtime secrets only. It does not apply
-Petclinic Argo CD Applications.
+This recreates the platform, runtime secrets, and Argo CD Application manifests.
+It does not wait for Petclinic workload health.
 
 ## Important Outputs
 

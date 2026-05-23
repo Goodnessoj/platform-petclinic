@@ -96,12 +96,12 @@ Use the `Platform` workflow:
 
 - Input `environment`: `dev` or `prod`
 - Input `action`: `apply`
-- Input `bootstrap_runtime_secrets`: `true` for initial cluster bootstrapping or
-  when runtime secrets should be refreshed.
+- Input `bootstrap_gitops`: `true` for initial cluster bootstrapping or when
+  runtime secrets and Argo CD Application manifests should be refreshed.
 
 The workflow also ensures the GitHub Actions IAM role has EKS access, creates
-or updates runtime secrets, and installs the shared secrets chart. It does not
-apply Petclinic Argo CD Applications.
+or updates runtime secrets, installs the shared secrets chart, and applies Argo
+CD Applications without waiting for workload health.
 
 ### Deploy Argo CD Applications
 
@@ -314,7 +314,7 @@ kubectl describe pod -n petclinic-dev -l app.kubernetes.io/instance=genai-servic
 Fixes:
 
 - Confirm GitHub secret `OPENAI_API_KEY` is set.
-- Rerun `Platform` apply with `bootstrap_runtime_secrets=true`, `Deploy ArgoCD
+- Rerun `Platform` apply with `bootstrap_gitops=true`, `Deploy ArgoCD
   Applications`, or `Deploy Changed Petclinic Services`.
 
 ### Argo CD Application Degraded Or Out Of Sync

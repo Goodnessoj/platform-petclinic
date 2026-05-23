@@ -40,8 +40,8 @@ on:
           - plan
           - apply
           - destroy
-      bootstrap_runtime_secrets:
-        description: Create runtime Kubernetes secrets after Terraform apply.
+      bootstrap_gitops:
+        description: Create runtime secrets and apply Argo CD app manifests after Terraform apply.
         required: true
         type: boolean
         default: true
@@ -100,7 +100,7 @@ jobs:
           set -euo pipefail
 
           ACTION="${{ github.event.inputs.action || '' }}"
-          BOOTSTRAP_RUNTIME_SECRETS="${{ github.event.inputs.bootstrap_runtime_secrets || 'true' }}"
+          BOOTSTRAP_GITOPS="${{ github.event.inputs.bootstrap_gitops || 'true' }}"
 
           case "$DEPLOY_ENV" in
             dev|prod)
@@ -140,7 +140,7 @@ jobs:
 
           echo "environment=$DEPLOY_ENV" >> "$GITHUB_OUTPUT"
           echo "action=$ACTION" >> "$GITHUB_OUTPUT"
-          echo "bootstrap_runtime_secrets=$BOOTSTRAP_RUNTIME_SECRETS" >> "$GITHUB_OUTPUT"
+          echo "bootstrap_gitops=$BOOTSTRAP_GITOPS" >> "$GITHUB_OUTPUT"
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
@@ -149,11 +149,11 @@ jobs:
           terraform_wrapper: false
 
       - name: Set up kubectl
-        if: steps.mode.outputs.action == 'destroy' || (steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_runtime_secrets == 'true')
+        if: steps.mode.outputs.action == 'destroy' || (steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true')
         uses: azure/setup-kubectl@v4
 
       - name: Set up Helm
-        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_runtime_secrets == 'true'
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
         uses: azure/setup-helm@v4
         with:
           version: v3.15.4
@@ -809,7 +809,7 @@ jobs:
           run_destroy
 
       - name: Export Terraform outputs
-        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_runtime_secrets == 'true'
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -829,7 +829,7 @@ jobs:
           echo "APP_NAMESPACE=$APP_NAMESPACE" >> "$GITHUB_ENV"
 
       - name: Update kubeconfig
-        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_runtime_secrets == 'true'
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
         run: |
           aws eks update-kubeconfig \
             --name "$CLUSTER_NAME" \
@@ -838,20 +838,20 @@ jobs:
           kubectl config current-context
 
       - name: Verify Kubernetes authentication
-        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_runtime_secrets == 'true'
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
         run: |
           kubectl auth can-i get namespaces
           kubectl get nodes
 
       - name: Create app namespace
-        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_runtime_secrets == 'true'
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
         run: |
           kubectl create namespace "$APP_NAMESPACE" \
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
       - name: Validate External Secrets prerequisites
-        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_runtime_secrets == 'true'
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -880,7 +880,7 @@ jobs:
           fi
 
       - name: Create or update OpenAI secret
-        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_runtime_secrets == 'true'
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
         shell: bash
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -907,7 +907,7 @@ jobs:
             -o yaml | kubectl apply -f -
 
       - name: Install shared ExternalSecrets chart
-        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_runtime_secrets == 'true'
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
         run: |
           helm upgrade --install "$SECRETS_RELEASE_NAME" "$SECRETS_CHART" \
             --namespace "$APP_NAMESPACE" \
@@ -919,7 +919,7 @@ jobs:
             --set openai.enabled=false
 
       - name: Wait for database secret
-        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_runtime_secrets == 'true'
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
         run: |
           set -euo pipefail
 
@@ -939,6 +939,46 @@ jobs:
           echo "mysql-secret was not created by External Secrets within the timeout window." >&2
           exit 1
 
+      - name: Apply ArgoCD applications
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
+        run: |
+          set -euo pipefail
+
+          if ! kubectl get namespace "$ARGOCD_NAMESPACE" >/dev/null 2>&1; then
+            echo "Argo CD namespace '$ARGOCD_NAMESPACE' is missing. Terraform addons did not finish installing Argo CD." >&2
+            exit 1
+          fi
+
+          kubectl wait \
+            --for=condition=Established \
+            crd/applications.argoproj.io \
+            crd/appprojects.argoproj.io \
+            --timeout=120s
+
+          kubectl apply -f k8s/argocd/applications/project.yaml
+          kubectl apply -k "k8s/argocd/applications/$DEPLOY_ENV"
+
+          for SERVICE in \
+            config-server \
+            discovery-server \
+            customers-service \
+            vets-service \
+            visits-service \
+            genai-service \
+            api-gateway \
+            admin-server; do
+            APP="${SERVICE}-${DEPLOY_ENV}"
+            kubectl annotate application "$APP" \
+              --namespace "$ARGOCD_NAMESPACE" \
+              argocd.argoproj.io/refresh=hard \
+              --overwrite
+          done
+
+      - name: Show ArgoCD applications
+        if: steps.mode.outputs.action == 'apply' && steps.mode.outputs.bootstrap_gitops == 'true'
+        run: |
+          kubectl get applications --namespace "$ARGOCD_NAMESPACE" -o wide || true
+
       - name: Workflow summary
         if: always()
         shell: bash
@@ -954,5 +994,5 @@ jobs:
               echo "- Terraform vars: Terraform defaults"
             fi
             echo "- AWS region: \`$AWS_REGION\`"
-            echo "- Runtime secret bootstrap: \`${{ steps.mode.outputs.bootstrap_runtime_secrets || 'false' }}\`"
+            echo "- GitOps bootstrap: \`${{ steps.mode.outputs.bootstrap_gitops || 'false' }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
