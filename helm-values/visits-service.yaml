@@ -2,7 +2,7 @@ nameOverride: visits-service
 
 image:
   repository: petclinic-dev-visits-service
-  tag: "e5ae608"
+  tag: "00ec63b"
   pullPolicy: IfNotPresent
 
 service:

@@ -2,7 +2,7 @@ nameOverride: vets-service
 
 image:
   repository: petclinic-dev-vets-service
-  tag: "e5ae608"
+  tag: "00ec63b"
   pullPolicy: IfNotPresent
 
 service:
