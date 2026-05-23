@@ -2,7 +2,7 @@ nameOverride: config-server
 
 image:
   repository: petclinic-dev-config-server
-  tag: "a333d49"
+  tag: "00ec63b"
   pullPolicy: IfNotPresent
 
 service:
