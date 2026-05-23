@@ -64,6 +64,10 @@ module "eks" {
   github_actions_role_arn    = local.github_actions_role_arn
   admin_role_arns            = var.eks_admin_role_arns
   tags                       = local.common_tags
+
+  depends_on = [
+    module.vpc
+  ]
 }
 
 module "rds" {

@@ -147,14 +147,15 @@ resource "kubernetes_namespace_v1" "application" {
 }
 
 resource "helm_release" "external_secrets" {
-  name             = "external-secrets"
-  repository       = "https://charts.external-secrets.io"
-  chart            = "external-secrets"
-  version          = var.external_secrets_chart_version
-  namespace        = local.external_secrets_namespace
-  create_namespace = true
-  wait             = true
-  timeout          = 900
+  name                       = "external-secrets"
+  repository                 = "https://charts.external-secrets.io"
+  chart                      = "external-secrets"
+  version                    = var.external_secrets_chart_version
+  namespace                  = local.external_secrets_namespace
+  create_namespace           = true
+  wait                       = true
+  timeout                    = 900
+  disable_openapi_validation = true
 
   values = [
     yamlencode({
@@ -270,14 +271,15 @@ resource "helm_release" "external_dns" {
 }
 
 resource "helm_release" "argocd" {
-  name             = "argocd"
-  repository       = "https://argoproj.github.io/argo-helm"
-  chart            = "argo-cd"
-  version          = var.argocd_chart_version
-  namespace        = "argocd"
-  create_namespace = true
-  wait             = true
-  timeout          = 1800
+  name                       = "argocd"
+  repository                 = "https://argoproj.github.io/argo-helm"
+  chart                      = "argo-cd"
+  version                    = var.argocd_chart_version
+  namespace                  = "argocd"
+  create_namespace           = true
+  wait                       = true
+  timeout                    = 1800
+  disable_openapi_validation = true
 
   values = [
     yamlencode({

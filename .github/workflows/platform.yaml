@@ -300,6 +300,26 @@ jobs:
             fi
           }
 
+          ACCESS_ENTRY_ADDRESS="module.eks.aws_eks_access_entry.cluster_admin[\"$PRINCIPAL_ARN\"]"
+          ACCESS_POLICY_ADDRESS="module.eks.aws_eks_access_policy_association.cluster_admin[\"$PRINCIPAL_ARN\"]"
+          STATE_LIST="$(terraform -chdir="$TF_WORKING_DIR" state list 2>/dev/null || true)"
+
+          if ! printf '%s\n' "$STATE_LIST" | grep -Fxq "$ACCESS_ENTRY_ADDRESS"; then
+            terraform -chdir="$TF_WORKING_DIR" import \
+              -input=false \
+              "$ACCESS_ENTRY_ADDRESS" \
+              "$CLUSTER_NAME:$PRINCIPAL_ARN"
+          fi
+
+          STATE_LIST="$(terraform -chdir="$TF_WORKING_DIR" state list 2>/dev/null || true)"
+
+          if ! printf '%s\n' "$STATE_LIST" | grep -Fxq "$ACCESS_POLICY_ADDRESS"; then
+            terraform -chdir="$TF_WORKING_DIR" import \
+              -input=false \
+              "$ACCESS_POLICY_ADDRESS" \
+              "$CLUSTER_NAME#$PRINCIPAL_ARN#$POLICY_ARN"
+          fi
+
           sleep 20
           echo "Ensured EKS cluster-admin access for $PRINCIPAL_ARN on $CLUSTER_NAME."
 

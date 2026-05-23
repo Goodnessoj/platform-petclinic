@@ -255,12 +255,13 @@ locals {
 }
 
 resource "helm_release" "monitoring" {
-  name             = "monitoring"
-  chart            = "https://github.com/prometheus-community/helm-charts/releases/download/kube-prometheus-stack-${var.kube_prometheus_stack_chart_version}/kube-prometheus-stack-${var.kube_prometheus_stack_chart_version}.tgz"
-  namespace        = local.monitoring_namespace
-  create_namespace = true
-  wait             = true
-  timeout          = 900
+  name                       = "monitoring"
+  chart                      = "https://github.com/prometheus-community/helm-charts/releases/download/kube-prometheus-stack-${var.kube_prometheus_stack_chart_version}/kube-prometheus-stack-${var.kube_prometheus_stack_chart_version}.tgz"
+  namespace                  = local.monitoring_namespace
+  create_namespace           = true
+  wait                       = true
+  timeout                    = 900
+  disable_openapi_validation = true
 
   values = [
     file("${path.module}/values/monitoring.yaml"),

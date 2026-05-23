@@ -7,7 +7,10 @@ locals {
 
   oidc_provider_url = replace(aws_eks_cluster.main.identity[0].oidc[0].issuer, "https://", "")
 
-  cluster_admin_principal_arns = toset(distinct(compact(var.admin_role_arns)))
+  cluster_admin_principal_arns = toset(distinct(compact(concat(
+    [var.github_actions_role_arn],
+    var.admin_role_arns
+  ))))
 
   external_secrets_namespace       = "external-secrets"
   external_secrets_service_account = "external-secrets"
@@ -59,10 +62,16 @@ resource "aws_eks_cluster" "main" {
 
   access_config {
     authentication_mode                         = "API_AND_CONFIG_MAP"
-    bootstrap_cluster_creator_admin_permissions = true
+    bootstrap_cluster_creator_admin_permissions = false
   }
 
   tags = var.tags
+
+  lifecycle {
+    ignore_changes = [
+      access_config[0].bootstrap_cluster_creator_admin_permissions
+    ]
+  }
 
   depends_on = [
     aws_iam_role_policy_attachment.eks_cluster_policy
