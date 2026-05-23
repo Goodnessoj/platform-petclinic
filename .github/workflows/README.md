@@ -10,10 +10,10 @@ the platform.
   `destroy`; pull requests and pushes run plan-only checks against `dev`.
   Before Terraform refreshes Kubernetes resources, it ensures the selected EKS
   cluster grants the workflow role cluster-admin access through EKS access
-  entries. Apply runs can bootstrap runtime secrets and Argo CD Application
-  manifests, but do not wait for Petclinic workload health. Destroy runs also
-  set up kubectl, remove GitOps-owned Applications, ExternalSecrets, ingresses,
-  and TargetGroupBindings, destroy
+  entries. Apply runs can bootstrap runtime secrets, but do not apply or wait
+  for Petclinic Argo CD Applications. Destroy runs also set up kubectl, remove
+  GitOps-owned Applications, ExternalSecrets, ingresses, and TargetGroupBindings,
+  destroy
   Terraform-managed platform ingress/DNS resources first, optionally force-delete
   leftover cluster ALBs and VPC dependencies, then wait for all ACM certificates
   to detach before running a fresh Terraform destroy.
@@ -59,8 +59,7 @@ destroy. The role must be able to read and create AWS service-linked roles; EKS
 managed node group creation checks `AWSServiceRoleForAmazonEKSNodegroup` with
 `iam:GetRole`.
 
-`platform.yaml` can bootstrap GitOps only when `OPENAI_API_KEY` is configured as
-a GitHub secret. Local Terraform does not receive that secret, so a local apply
-can leave Argo CD installed but with no Petclinic Applications applied.
-Petclinic application health is gated by `deploy-argocd.yml`, not by the
-platform workflow.
+`platform.yaml` can bootstrap runtime secrets only when `OPENAI_API_KEY` is
+configured as a GitHub secret. Local Terraform does not receive that secret.
+Petclinic Argo CD Application apply and health are gated by `deploy-argocd.yml`,
+not by the platform workflow.

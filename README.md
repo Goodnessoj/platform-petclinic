@@ -11,8 +11,8 @@ The active deployment path is:
    RDS MySQL, Secrets Manager entries, platform add-ons, DNS, and observability.
 2. Helm charts describe the Petclinic services and shared runtime secrets.
 3. Argo CD applies one Helm release per service from this repository.
-4. GitHub Actions updates image tags, applies Terraform, bootstraps Argo CD, and
-   can deploy selected services in dependency order.
+4. GitHub Actions applies Terraform, updates image tags, dispatches Argo CD
+   deploys, and can deploy selected services in dependency order.
 
 ## Repository Layout
 
@@ -40,7 +40,7 @@ The active deployment path is:
 - **Secrets:** External Secrets Operator reads AWS Secrets Manager into
   Kubernetes secrets such as `mysql-secret`. The OpenAI runtime secret is
   created directly by GitHub Actions from the `OPENAI_API_KEY` GitHub secret
-  when GitOps bootstrap runs.
+  when runtime secret bootstrap or the Argo CD deploy workflow runs.
 - **Ingress and DNS:** AWS Load Balancer Controller, optional ExternalDNS, ACM,
   Route 53 records, and ALB-backed ingresses for the app, Argo CD, Grafana,
   Prometheus, and selected dev service dashboards.
@@ -92,11 +92,11 @@ terraform -chdir=terraform/environments/dev apply -var-file=terraform.tfvars
 ```
 
 Local Terraform apply creates the AWS and Kubernetes platform, but it cannot
-read GitHub Secrets. For a full dev deploy that creates `openai-secret`, installs
-the shared application secrets chart, and applies Argo CD Applications, run the
-`Platform` workflow with `action=apply` and `bootstrap_gitops=true`. The
-platform workflow does not wait for Petclinic workload health; use
-`deploy-argocd.yml` for the Argo CD health gate.
+read GitHub Secrets. To create `openai-secret` and install the shared
+application secrets chart during platform apply, run the `Platform` workflow
+with `action=apply` and `bootstrap_runtime_secrets=true`. The platform workflow
+does not apply Petclinic Argo CD Applications; `deploy-argocd.yml` owns that
+deploy and health gate after image tag updates.
 
 After the dev platform is available, configure local Kubernetes access:
 

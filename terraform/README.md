@@ -57,9 +57,10 @@ runs and the platform workflow when the file exists.
 
 Local applies are useful for infrastructure repair and validation, but they do
 not have access to GitHub Secrets. If `create_openai_secret = false`, run the
-GitHub `Platform` workflow with `bootstrap_gitops=true` after apply so the
-workflow can create `openai-secret`, install the shared secrets chart, and apply
-Argo CD Applications.
+GitHub `Platform` workflow with `bootstrap_runtime_secrets=true` after apply so
+the workflow can create `openai-secret` and install the shared secrets chart.
+Petclinic Argo CD Applications are applied by `deploy-argocd.yml` after image tag
+updates.
 
 ## Provider Notes
 
@@ -80,7 +81,8 @@ tokens during long apply and destroy runs.
 1. Apply `environments/bootstrap`.
 2. Apply `environments/dev` or `environments/prod`.
 3. Use Terraform outputs to update kubeconfig or let GitHub Actions do it.
-4. Bootstrap or refresh Argo CD applications.
+4. Let `update-image-tags.yaml` dispatch `deploy-argocd.yml` for Petclinic
+   Argo CD Applications.
 
 When GitHub Actions applies the platform, the bootstrap-created role must have
 the current platform policy. Managed EKS node group creation requires
