@@ -2,7 +2,7 @@ nameOverride: api-gateway
 
 image:
   repository: petclinic-dev-api-gateway
-  tag: "a77195a"
+  tag: "3471815"
   pullPolicy: IfNotPresent
 
 service:
