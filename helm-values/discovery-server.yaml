@@ -2,7 +2,7 @@ nameOverride: discovery-server
 
 image:
   repository: petclinic-dev-discovery-server
-  tag: "a77195a"
+  tag: "7ab6b07"
   pullPolicy: IfNotPresent
 
 service:

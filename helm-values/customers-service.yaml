@@ -2,7 +2,7 @@ nameOverride: customers-service
 
 image:
   repository: petclinic-dev-customers-service
-  tag: "a77195a"
+  tag: "7ab6b07"
   pullPolicy: IfNotPresent
 
 service:
