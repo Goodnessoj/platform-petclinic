@@ -451,7 +451,7 @@ blocking Terraform.
 
 ## Useful References
 
-- `.github/README.md`
+- `.github/workflows/README.md`
 - `.github/workflows/platform.yaml`
 - `.github/workflows/deploy-argocd.yml`
 - `.github/workflows/deploy-services.yaml`

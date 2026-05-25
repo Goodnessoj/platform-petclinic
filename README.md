@@ -18,7 +18,7 @@ The active deployment path is:
 
 | Path | Purpose |
 | --- | --- |
-| [`.github/`](.github/README.md) | GitHub Actions workflows for Terraform, Argo CD, image tag updates, and service deployment. |
+| [`.github/workflows/`](.github/workflows/README.md) | GitHub Actions workflows for Terraform, Argo CD, image tag updates, and service deployment. |
 | [`terraform/`](terraform/README.md) | Terraform roots and reusable modules for AWS infrastructure. |
 | [`helm/`](helm/README.md) | Helm charts for service workloads and shared ExternalSecret resources. |
 | [`helm-values/`](helm-values/README.md) | Environment and service-specific values consumed by Helm and Argo CD. |
